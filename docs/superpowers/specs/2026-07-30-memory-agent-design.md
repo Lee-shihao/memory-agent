@@ -392,9 +392,9 @@ retrieval:
   similarity_threshold: 0.5
 
 llm:
-  api_base: https://api.openai.com/v1
-  api_key: ${OPENAI_API_KEY}
-  model: gpt-4o
+  api_base: https://api.deepseek.com/v1
+  api_key: ${DEEPSEEK_API_KEY}
+  model: deepseek-chat
 
 extractor:
   auto_confirm: false              # 是否跳过审核直接存储
