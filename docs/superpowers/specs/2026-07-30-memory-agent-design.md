@@ -164,6 +164,80 @@ User Query 进入（干净上下文）
 
 ---
 
+## Agent Loop：对话内的 Tool Call 迭代
+
+一个对话是一个独立单元：单个 User 入口 → Agent 内部 tool call 迭代 → 单个最终回复。没有 Session，没有多个 User Turn。
+
+### 一次完整对话的结构
+
+```
+一次对话（独立单元，三步走）
+│
+├─ Step 1: 记忆检索+注入（Retriever）
+│     User Query → LLM 决策 → 双通道检索 → 注入 System Prompt
+│
+├─ Step 2: Agent Loop（内部 tool call 迭代，用户不参与）
+│
+│     User Query 进入
+│       │
+│       ▼
+│     ┌──────────────────────────────────────┐
+│     │ LLM 调用                             │
+│     │ (system prompt + memory context      │
+│     │  + tools)                           │
+│     │       │                              │
+│     │       ├─→ 输出文本                    │
+│     │       │     → 最终回复，Loop 结束     │
+│     │       │                              │
+│     │       └─→ tool_calls                 │
+│     │             → 执行 tool              │
+│     │             → 结果反馈给 LLM          │
+│     │             → 继续下一轮 LLM 调用     │
+│     │             → 可能再调 tool...        │
+│     │             → 迭代直到 LLM 输出文本   │
+│     └──────────────────────────────────────┘
+│       │
+│       ▼
+│     最终回复返回给 User
+│
+├─ Step 3: 记忆提取+存储（Extractor）
+│     Agent Loop 完整 transcript → LLM 提取 → 用户审核 → 入库
+│
+对话结束。下一个对话从干净的 Step 1 重新开始。
+```
+
+### 关键设计点
+
+| 决策点 | 做法 | 理由 |
+|--------|------|------|
+| 对话单元 | 一个 User Query → 一个最终回复。每个对话是独立的工作单元 | 上下文完全隔离，只通过记忆库关联 |
+| Tool call 迭代 | Agent 内部循环，LLM 自主决定何时调 tool、何时回复用户 | 与 Claude Code / Codex 行为一致 |
+| 用户参与 | 只在一个对话开始时提供 Query，Agent 执行期间用户不介入 | 区分于多 Turn 聊天 |
+| 记忆粒度 | 每个对话结束后产生一条记忆 | 一个对话 = 一个完整任务 = 一条记忆 |
+| 对话边界 | 每次 CLI 调用就是一次对话，结束后自动进入 Extractor 流程 | 自然边界，无需额外管理 |
+
+### System Prompt 结构
+
+```
+┌──────────────────────────────────────────────┐
+│ System Prompt (base)                         │
+│ "You are a helpful assistant..."             │
+├──────────────────────────────────────────────┤
+│ Memory Context（Retriever 注入）              │
+│ "## Relevant Memories                        │
+│  ### [07-28] Python async patterns           │
+│  ..."                                        │
+├──────────────────────────────────────────────┤
+│ Tool List                                    │
+└──────────────────────────────────────────────┘
+```
+
+- **Memory Context**：跨对话的长期记忆，每个对话开始时重新检索注入。对话 A 和对话 B 可能注入不同的记忆
+- **Tool Call 过程中的上下文**：每次 LLM 调用都在 System Prompt + Memory Context + 本轮 tool call 历史的基础上进行，这是标准 Agent Loop 的行为
+- 对话结束 → Memory Context 随上下文一起销毁。下一次对话重新检索
+
+---
+
 ## Extractor：对话结束后的记忆提取
 
 ### 流程
