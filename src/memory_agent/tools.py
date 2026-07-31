@@ -256,6 +256,44 @@ def tool_load_skill(name: str = "") -> str:
     )
 
 
+# ── search_memory ─────────────────────────────────────────────────────────────
+
+def tool_search_memory(query: str, top_k: int = 5) -> str:
+    """Search the memory vector database for relevant past conversations."""
+    from memory_agent.storage import MemoryStore
+    from memory_agent.config import load_config
+
+    config = load_config(_workspace_root)
+    db_path = config.memory_dir / "memories.db"
+    store = MemoryStore(db_path)
+    store.init_schema()
+
+    if not hasattr(store, "_chroma_collection") or store._chroma_collection is None:
+        store.init_chroma(
+            persist_dir=config.memory_dir / "chroma",
+            embedding_api_base=config.embedding_api_base,
+            embedding_api_key=config.embedding_api_key,
+            embedding_model=config.embedding_model,
+        )
+
+    try:
+        results = store.query_chroma(query_text=query, top_k=top_k)
+    except Exception as e:
+        return f"Memory search failed: {e}"
+
+    if not results:
+        return f"No memories found matching: {query}"
+
+    lines = [f"Memory search results for '{query}':\n"]
+    for r in results:
+        mid = r.get("memory_id", "?")
+        text = r.get("text", "")[:200]
+        dist = r.get("distance")
+        score = f" (score: {1 - dist:.2f})" if dist is not None else ""
+        lines.append(f"[{mid}]{score} {text}")
+    return "\n".join(lines)
+
+
 # ── tool registry ─────────────────────────────────────────────────────────────
 
 TOOL_DEFINITIONS = [
@@ -401,6 +439,25 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_memory",
+            "description": (
+                "Search past conversation memories for relevant context. "
+                "Use this mid-conversation when you need to recall what was discussed "
+                "in previous conversations — e.g., past decisions, bug fixes, or design discussions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query for finding relevant memories"},
+                    "top_k": {"type": "integer", "description": "Number of results (default: 5)"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 TOOL_EXECUTORS = {
@@ -411,6 +468,7 @@ TOOL_EXECUTORS = {
     "git_ops": tool_git_ops,
     "run_bash": tool_run_bash,
     "load_skill": tool_load_skill,
+    "search_memory": tool_search_memory,
 }
 
 

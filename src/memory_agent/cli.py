@@ -124,10 +124,13 @@ def run_pipeline(
 ) -> None:
     """Execute the full 3-step pipeline for a single conversation turn."""
 
-    # Step 1: Memory Retrieval
+    # Step 1: Memory Retrieval + Skill Routing
     memory_context = ""
+    skill_context = ""
     injected_memories: list[dict] = []
+
     if not skip_memory:
+        # Memory retrieval
         print("Checking memory...", file=sys.stderr)
         try:
             retriever = Retriever(config, store)
@@ -136,6 +139,31 @@ def run_pipeline(
                 print(f"  Injected {len(injected_memories)} memory/memories.", file=sys.stderr)
         except Exception as e:
             print(f"  Memory retrieval failed: {e}", file=sys.stderr)
+
+        # Skill routing (embedding-based)
+        try:
+            from memory_agent.skills import SkillRouter, discover_skills, format_skills_for_injection
+
+            skills = discover_skills(config.memory_dir.parent)
+            if skills:
+                router = SkillRouter(
+                    chroma_dir=config.memory_dir / "chroma",
+                    embedding_api_base=config.embedding_api_base,
+                    embedding_api_key=config.embedding_api_key,
+                    embedding_model=config.embedding_model,
+                )
+                router.index_skills(skills)
+                matched = router.search(user_query, top_k=3)
+                if matched:
+                    skill_context = format_skills_for_injection(matched)
+                    print(f"  Matched {len(matched)} skill(s).", file=sys.stderr)
+        except Exception as e:
+            print(f"  Skill routing failed: {e}", file=sys.stderr)
+
+    # Combine contexts for system prompt
+    combined_context = memory_context
+    if skill_context:
+        combined_context = skill_context + ("\n\n" + memory_context if memory_context else "")
 
     # Handle /memory slash commands
     if user_query.startswith("/memory"):
@@ -149,7 +177,7 @@ def run_pipeline(
     transcript = run_agent_loop(
         config=config,
         user_query=user_query,
-        memory_context=memory_context,
+        memory_context=combined_context,
         confirm_callback=_bash_confirm if interactive else None,
     )
     print(transcript)
