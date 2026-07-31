@@ -13,14 +13,19 @@ _SEPARATOR = "─" * 70
 
 
 def enable(memory_dir: Path) -> None:
-    """Enable debug logging to .agent-memory/debug.log."""
+    """Enable debug logging to .agent-memory/debug.log.
+
+    The log file is cleared at the start of each new conversation.
+    """
     global _debug_enabled, _debug_file
     _debug_enabled = True
     memory_dir.mkdir(parents=True, exist_ok=True)
     _debug_file = memory_dir / "debug.log"
-    _write_raw(f"\n{'═' * 70}\n")
-    _write_raw(f"  Debug session started: {datetime.now(timezone.utc).isoformat()}\n")
-    _write_raw(f"{'═' * 70}\n\n")
+    # Truncate on new session
+    with open(_debug_file, "w") as f:
+        f.write(f"{'═' * 70}\n")
+        f.write(f"  Debug session: {datetime.now(timezone.utc).isoformat()}\n")
+        f.write(f"{'═' * 70}\n\n")
 
 
 def disable() -> None:
