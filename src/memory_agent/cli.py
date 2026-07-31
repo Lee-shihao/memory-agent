@@ -188,7 +188,7 @@ def run_pipeline(
         try:
             extract_and_store(
                 transcript=transcript, config=config, store=store,
-                auto_confirm=False if manual_extract else None,
+                auto_confirm=not manual_extract,
             )
         except Exception as e:
             print(f"Memory extraction failed: {e}", file=sys.stderr)
