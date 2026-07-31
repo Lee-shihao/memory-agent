@@ -8,7 +8,7 @@ from memory_agent.config import Config
 from memory_agent.debug import is_enabled as _debug_enabled
 from memory_agent.debug import log_request as _log_req
 from memory_agent.debug import log_response as _log_resp
-from memory_agent.prompts import BASE_AGENT_SYSTEM_PROMPT, ROUND_1_SYSTEM_PROMPT, ROUND_2_PLUS_PROMPT
+from memory_agent.prompts import ROUND_1_SYSTEM_PROMPT, ROUND_2_PLUS_PROMPT
 from memory_agent.tools import TOOL_DEFINITIONS, execute_tool
 
 # Callback: (tool_name, arguments) -> (allowed: bool, feedback: str)

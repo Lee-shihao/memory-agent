@@ -76,21 +76,16 @@ class TestSearchSkills:
         assert "No new skills found" in result2 or "refactoring-wizard" not in result2
 
     def test_search_skills_no_skills_installed(self, tmp_path):
-        """When no skills exist, return appropriate message."""
         from memory_agent.tools import reset_session_state
-
         reset_session_state()
-
         with patch("memory_agent.skills.SkillRouter") as MockRouter:
             mock_router = MockRouter.return_value
             mock_router.search.return_value = []
             mock_router._collection.count.return_value = 0
-
-            from memory_agent.tools import tool_search_skills
-
-            result = tool_search_skills(query="anything")
-
-        assert "No skills" in result or "not found" in result.lower()
+            with patch("memory_agent.skills.discover_skills", return_value=[]):
+                from memory_agent.tools import tool_search_skills
+                result = tool_search_skills(query="anything")
+        assert "No skills installed" in result
 
 
 class TestSearchMemoryDedup:
@@ -123,6 +118,7 @@ class TestSearchMemoryDedup:
         assert "mem-2" in result1
         # Second call: mem-1 should be filtered, mem-3 should appear
         assert "mem-3" in result2
+        assert "mem-1" not in result2
 
 
 class TestSessionState:

@@ -18,7 +18,7 @@ def reset_session_state() -> None:
     _returned_skill_names.clear()
 
 
-def pre_index_skills(config) -> None:
+def pre_index_skills(config: "Config") -> None:
     """Ensure all skills are indexed in ChromaDB before the agent loop.
 
     Does NOT inject skills into the system prompt — only indexes them so
