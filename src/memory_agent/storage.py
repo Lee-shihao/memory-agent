@@ -1,9 +1,13 @@
 """Storage layer: SQLite for metadata, ChromaDB for vectors."""
 import json
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+import chromadb
+from chromadb.config import Settings as ChromaSettings
 
 
 SCHEMA_SQL = """
@@ -66,6 +70,72 @@ class MemoryStore:
         conn = self._get_conn()
         conn.executescript(SCHEMA_SQL)
         conn.commit()
+
+    def init_chroma(self, persist_dir, embedding_api_base, embedding_api_key, embedding_model):
+        persist_dir.mkdir(parents=True, exist_ok=True)
+        self._chroma_client = chromadb.PersistentClient(
+            path=str(persist_dir),
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+        self._chroma_collection = self._chroma_client.get_or_create_collection(
+            name="memories",
+            metadata={"hnsw:space": "cosine"},
+        )
+        self._embedding_api_base = embedding_api_base
+        self._embedding_api_key = embedding_api_key or os.environ.get("SF_API_KEY", "")
+        self._embedding_model = embedding_model
+
+    def _get_embedding(self, text: str) -> list[float]:
+        import httpx
+        response = httpx.post(
+            f"{self._embedding_api_base}/embeddings",
+            headers={
+                "Authorization": f"Bearer {self._embedding_api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": self._embedding_model, "input": text},
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["data"][0]["embedding"]
+
+    def add_to_chroma(self, memory_id, text, metadata) -> str:
+        embedding = self._get_embedding(text)
+        doc_id = f"mem-{memory_id}"
+        self._chroma_collection.add(
+            ids=[doc_id], embeddings=[embedding],
+            documents=[text], metadatas=[{**metadata, "memory_id": memory_id}],
+        )
+        return doc_id
+
+    def query_chroma(self, query_text, top_k, min_distance=None) -> list[dict]:
+        embedding = self._get_embedding(query_text)
+        results = self._chroma_collection.query(
+            query_embeddings=[embedding], n_results=top_k,
+            include=["documents", "metadatas", "distances"],
+        )
+        memories = []
+        if results["ids"] and results["ids"][0]:
+            for i, doc_id in enumerate(results["ids"][0]):
+                distance = results["distances"][0][i] if results["distances"] else None
+                if min_distance is not None and distance is not None and distance > min_distance:
+                    continue
+                metadata = results["metadatas"][0][i] if results["metadatas"] else {}
+                memories.append({
+                    "chroma_doc_id": doc_id,
+                    "memory_id": metadata.get("memory_id", ""),
+                    "text": results["documents"][0][i] if results["documents"] else "",
+                    "metadata": metadata,
+                    "distance": distance,
+                })
+        return memories
+
+    def delete_from_chroma(self, doc_id):
+        self._chroma_collection.delete(ids=[doc_id])
+
+    def count_chroma(self) -> int:
+        return self._chroma_collection.count()
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:

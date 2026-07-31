@@ -1,6 +1,27 @@
 # tests/test_storage.py
+import hashlib
+import os
 from datetime import datetime, timezone
+
+import pytest
+
 from memory_agent.storage import MemoryStore
+
+
+@pytest.fixture(autouse=True)
+def fake_embedding(monkeypatch):
+    """Deterministic fake embeddings so ChromaDB tests never hit the embedding API.
+
+    ChromaDB tests pass a fake API base/key; the real `_get_embedding` would
+    make an HTTP call (401 for the fake key). We stub it with a hash-based
+    embedding instead.
+    """
+
+    def _fake_embedding(self, text: str) -> list[float]:
+        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        return [b / 255.0 for b in digest[:16]]
+
+    monkeypatch.setattr(MemoryStore, "_get_embedding", _fake_embedding)
 
 
 class TestInitSchema:
@@ -122,3 +143,59 @@ class TestStatus:
         status = store.get_status()
         assert status["total_memories"] == 3
         assert status["total_tags"] == 4
+
+
+class TestChromaDB:
+    def test_init_creates_collection(self, temp_project):
+        db_path = temp_project / "test.db"
+        chroma_dir = temp_project / "chroma"
+        store = MemoryStore(db_path)
+        store.init_schema()
+        store.init_chroma(
+            persist_dir=chroma_dir,
+            embedding_api_base="https://api.siliconflow.cn/v1",
+            embedding_api_key=os.environ.get("SF_API_KEY", "test-key"),
+            embedding_model="BAAI/bge-m3",
+        )
+        assert store._chroma_client is not None
+        assert store._chroma_collection is not None
+        assert store.count_chroma() == 0
+
+    def test_add_and_query(self, temp_project):
+        db_path = temp_project / "test.db"
+        chroma_dir = temp_project / "chroma"
+        store = MemoryStore(db_path)
+        store.init_schema()
+        store.init_chroma(
+            persist_dir=chroma_dir,
+            embedding_api_base="https://api.siliconflow.cn/v1",
+            embedding_api_key=os.environ.get("SF_API_KEY", "test-key"),
+            embedding_model="BAAI/bge-m3",
+        )
+        store.add_to_chroma(
+            memory_id="mem-1", text="Python async patterns",
+            metadata={"tags": "python", "conversation_at": "2026-07-28T00:00:00Z"},
+        )
+        store.add_to_chroma(
+            memory_id="mem-2", text="Database connection pooling",
+            metadata={"tags": "database", "conversation_at": "2026-07-29T00:00:00Z"},
+        )
+        assert store.count_chroma() == 2
+        results = store.query_chroma("Python async programming", top_k=2)
+        assert len(results) > 0
+
+    def test_delete(self, temp_project):
+        db_path = temp_project / "test.db"
+        chroma_dir = temp_project / "chroma"
+        store = MemoryStore(db_path)
+        store.init_schema()
+        store.init_chroma(
+            persist_dir=chroma_dir,
+            embedding_api_base="https://api.siliconflow.cn/v1",
+            embedding_api_key=os.environ.get("SF_API_KEY", "test-key"),
+            embedding_model="BAAI/bge-m3",
+        )
+        doc_id = store.add_to_chroma(memory_id="mem-del", text="Temporary", metadata={})
+        assert store.count_chroma() == 1
+        store.delete_from_chroma(doc_id)
+        assert store.count_chroma() == 0

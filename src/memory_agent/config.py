@@ -15,9 +15,9 @@ llm:
   model: deepseek-chat
 
 embedding:
-  api_base: https://api.openai.com/v1
-  api_key: ${OPENAI_API_KEY}
-  model: text-embedding-3-small
+  api_base: https://api.siliconflow.cn/v1
+  api_key: ${SF_API_KEY}
+  model: BAAI/bge-m3
 
 retrieval:
   top_k: 10

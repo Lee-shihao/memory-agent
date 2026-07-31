@@ -37,7 +37,7 @@ class TestLoadConfig:
     def test_loads_from_project_root(self, temp_project_with_config):
         cfg = load_config(temp_project_with_config)
         assert cfg.llm_model == "deepseek-chat"
-        assert cfg.embedding_model == "text-embedding-3-small"
+        assert cfg.embedding_model == "BAAI/bge-m3"
         assert cfg.retrieval_top_k == 10
 
     def test_creates_default_config_if_missing(self, temp_project):
