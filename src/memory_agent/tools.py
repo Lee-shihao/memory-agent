@@ -557,30 +557,6 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
-            "name": "load_skill",
-            "description": (
-                "Load a skill's instructions. Skills extend your capabilities with "
-                "domain-specific workflows, tools, or knowledge. "
-                "Call with no arguments to list available skills. "
-                "Call with a skill name to load its full instructions into context. "
-                "Use this when: you need specialized knowledge, the user asks for a "
-                "specific skill, or you're unsure how to proceed in a domain."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Skill name to load, or empty to list all skills",
-                    },
-                },
-                "required": [],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
             "name": "search_memory",
             "description": (
                 "Search past conversation memories for relevant context. "
