@@ -2,12 +2,17 @@
 import subprocess
 from pathlib import Path
 
-WORKSPACE_ROOT = Path.cwd()
+_workspace_root = Path.cwd()
+
+
+def set_workspace_root(path: Path) -> None:
+    global _workspace_root
+    _workspace_root = path.resolve()
 
 
 def _resolve_path(file_path: str) -> Path:
     p = Path(file_path)
-    return p if p.is_absolute() else WORKSPACE_ROOT / p
+    return p if p.is_absolute() else _workspace_root / p
 
 
 def tool_read_file(file_path: str, offset: int = 0, limit: int | None = None) -> str:
@@ -40,7 +45,7 @@ def tool_write_file(file_path: str, content: str) -> str:
 
 def tool_run_bash(command: str, timeout: int = 120) -> str:
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout, cwd=str(WORKSPACE_ROOT))
+        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=timeout, cwd=str(_workspace_root))
         output = result.stdout
         if result.stderr:
             output += "\n[stderr]\n" + result.stderr

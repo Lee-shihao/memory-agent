@@ -1,11 +1,14 @@
 """Retriever: LLM decision → dual-channel search → format for injection."""
 import json
+import logging
 from memory_agent.config import Config
 from memory_agent.storage import MemoryStore
 from memory_agent.prompts import (
     RETRIEVAL_DECISION_SYSTEM_PROMPT, RETRIEVAL_DECISION_USER_TEMPLATE,
     format_memories_for_injection,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Retriever:
@@ -42,8 +45,28 @@ class Retriever:
             seen.add(mid)
             deduped.append(r)
 
-        context = format_memories_for_injection(deduped)
-        return deduped, context
+        # Hydrate semantic results: ChromaDB returns {memory_id, text, distance}
+        # but format_memory_for_injection needs {summary, key_points, tags, ...}
+        hydrated = []
+        for r in deduped:
+            mid = r.get("memory_id") or r.get("id")
+            if "summary" not in r or r.get("summary") is None:
+                full = self.store.get_memory(mid)
+                if full:
+                    hydrated.append(full)
+                else:
+                    hydrated.append({
+                        "id": mid, "memory_id": mid,
+                        "summary": r.get("text", ""),
+                        "key_points": [], "tags": [],
+                        "conversation_at": None,
+                        "entities": [], "decisions": [],
+                    })
+            else:
+                hydrated.append(r)
+
+        context = format_memories_for_injection(hydrated)
+        return hydrated, context
 
     def _llm_decision(self, user_query: str) -> dict:
         import httpx
@@ -63,10 +86,14 @@ class Retriever:
         response.raise_for_status()
         data = response.json()
         content = data["choices"][0]["message"]["content"]
-        return json.loads(content)
+        try:
+            return json.loads(content)
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("Failed to parse retrieval decision JSON: %s", e)
+            return {"need_retrieve": False, "semantic_queries": [], "recent_range": None}
 
     def _semantic_search(self, query: str) -> list[dict]:
-        return self.store.query_chroma(query_text=query, top_k=self.config.retrieval_top_k)
+        return self.store.query_chroma(query_text=query, top_k=self.config.retrieval_top_k, min_distance=self.config.retrieval_similarity_threshold)
 
     def _time_range_search(self, limit: int, offset: int) -> list[dict]:
         return self.store.get_recent_memories(limit=limit, offset=offset)

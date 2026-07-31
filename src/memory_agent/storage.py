@@ -152,9 +152,11 @@ class MemoryStore:
     def insert_memory(
         self, summary, conversation_at, conversation_json,
         chroma_doc_id, key_points, tags, entities, decisions,
+        memory_id: str = None,
     ) -> str:
         conn = self._get_conn()
-        memory_id = uuid.uuid4().hex[:12]
+        if memory_id is None:
+            memory_id = uuid.uuid4().hex[:12]
 
         conn.execute(
             """INSERT INTO memories (id, summary, conversation_at, conversation_json, chroma_doc_id)

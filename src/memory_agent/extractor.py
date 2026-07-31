@@ -1,5 +1,6 @@
 """Extractor: post-conversation memory extraction with user review."""
 import json
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import httpx
@@ -130,11 +131,13 @@ def _store_result(result: ExtractionResult, transcript: str, config: Config, sto
     embedding_text = result.summary
     if result.key_points:
         embedding_text += "\n" + "\n".join(result.key_points)
-    chroma_doc_id = store.add_to_chroma(memory_id="pending", text=embedding_text, metadata={"tags": ",".join(result.tags), "conversation_at": now.isoformat()})
+    memory_id = uuid.uuid4().hex[:12]
+    chroma_doc_id = store.add_to_chroma(memory_id=memory_id, text=embedding_text, metadata={"tags": ",".join(result.tags), "conversation_at": now.isoformat()})
     conversation_json = json.dumps({"transcript": transcript}) if config.extractor_keep_full_transcript else None
     memory_id = store.insert_memory(
         summary=result.summary, conversation_at=now, conversation_json=conversation_json,
         chroma_doc_id=chroma_doc_id, key_points=result.key_points, tags=result.tags,
         entities=result.entities, decisions=result.decisions,
+        memory_id=memory_id,
     )
     print(f"  Memory ID: {memory_id}")

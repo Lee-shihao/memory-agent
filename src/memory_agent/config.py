@@ -1,10 +1,13 @@
 """Configuration loading with env var substitution."""
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_CONFIG_YAML = """\
@@ -35,7 +38,11 @@ def _resolve_env_vars(value: str) -> str:
     """Replace ${VAR} patterns with environment variable values."""
     def _replace(match):
         var_name = match.group(1)
-        return os.environ.get(var_name, match.group(0))
+        env_val = os.environ.get(var_name)
+        if env_val is None:
+            logger.warning("Environment variable '%s' is not set; placeholder '%s' left unresolved.", var_name, match.group(0))
+            return match.group(0)
+        return env_val
     return _ENV_VAR_RE.sub(_replace, value)
 
 

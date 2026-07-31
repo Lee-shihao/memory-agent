@@ -8,6 +8,8 @@ from memory_agent.storage import MemoryStore
 from memory_agent.retriever import Retriever
 from memory_agent.agent_loop import run_agent_loop
 from memory_agent.extractor import extract_and_store
+from memory_agent.tools import set_workspace_root
+from memory_agent.commands import handle_slash_command
 
 
 def main():
@@ -26,11 +28,18 @@ def main():
         parser.print_help(); sys.exit(1)
 
     project_root = args.project.resolve()
+    set_workspace_root(project_root)
     config = load_config(project_root)
 
     db_path = config.memory_dir / "memories.db"
     store = MemoryStore(db_path)
     store.init_schema()
+    store.init_chroma(
+        persist_dir=config.memory_dir / "chroma",
+        embedding_api_base=config.embedding_api_base,
+        embedding_api_key=config.embedding_api_key,
+        embedding_model=config.embedding_model,
+    )
 
     # Step 1: Memory Retrieval
     memory_context = ""
@@ -44,6 +53,13 @@ def main():
                 print(f"  Injected {len(injected_memories)} memory/memories.", file=sys.stderr)
         except Exception as e:
             print(f"  Memory retrieval failed: {e}", file=sys.stderr)
+
+    # Handle /memory slash commands
+    if user_query.startswith("/memory"):
+        is_cmd, response = handle_slash_command(user_query, store, injected_memories)
+        if is_cmd:
+            print(response)
+            return
 
     # Step 2: Agent Loop
     print(file=sys.stderr)
