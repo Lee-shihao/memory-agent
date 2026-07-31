@@ -8,6 +8,7 @@ from memory_agent.config import Config
 from memory_agent.debug import is_enabled as _debug_enabled
 from memory_agent.debug import log_request as _log_req
 from memory_agent.debug import log_response as _log_resp
+from memory_agent.debug import accumulate_usage as _accumulate_usage
 from memory_agent.storage import MemoryStore
 from memory_agent.prompts import EXTRACTOR_SYSTEM_PROMPT, EXTRACTOR_USER_TEMPLATE
 
@@ -47,6 +48,9 @@ def _call_extraction_llm(config: Config, transcript: str) -> ExtractionResult:
     data = response.json()
     if _debug_enabled():
         _log_resp(rid, response.status_code, data)
+        usage = data.get("usage")
+        if usage:
+            _accumulate_usage(usage)
     content = data["choices"][0]["message"]["content"]
     return ExtractionResult.from_dict(json.loads(content))
 
@@ -101,7 +105,10 @@ def _open_editor(result: ExtractionResult) -> ExtractionResult:
         os.unlink(tmp_path)
 
 
-def extract_and_store(transcript: str, config: Config, store: MemoryStore) -> bool:
+def extract_and_store(
+    transcript: str, config: Config, store: MemoryStore,
+    *, auto_confirm: bool | None = None,
+) -> bool:
     print("\nExtracting memory from conversation...")
     try:
         result = _call_extraction_llm(config, transcript)
@@ -109,7 +116,12 @@ def extract_and_store(transcript: str, config: Config, store: MemoryStore) -> bo
         print(f"Extraction failed: {e}")
         return False
 
-    if config.extractor_auto_confirm:
+    effective_auto_confirm = (
+        auto_confirm if auto_confirm is not None
+        else config.extractor_auto_confirm
+    )
+
+    if effective_auto_confirm:
         _store_result(result, transcript, config, store)
         print("Memory saved (auto-confirm).")
         return True

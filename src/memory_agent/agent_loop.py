@@ -8,6 +8,7 @@ from memory_agent.config import Config
 from memory_agent.debug import is_enabled as _debug_enabled
 from memory_agent.debug import log_request as _log_req
 from memory_agent.debug import log_response as _log_resp
+from memory_agent.debug import accumulate_usage as _accumulate_usage
 from memory_agent.prompts import ROUND_1_SYSTEM_PROMPT, ROUND_2_PLUS_PROMPT
 from memory_agent.tools import TOOL_DEFINITIONS, execute_tool
 
@@ -75,6 +76,9 @@ def run_agent_loop(
         data = response.json()
         if _debug_enabled():
             _log_resp(rid, response.status_code, data)
+            usage = data.get("usage")
+            if usage:
+                _accumulate_usage(usage)
         choice = data["choices"][0]
         message = choice["message"]
         tool_calls = message.get("tool_calls")

@@ -13,10 +13,14 @@ from pathlib import Path
 
 from memory_agent.config import load_config, Config
 from memory_agent.debug import enable as _debug_enable
+from memory_agent.debug import is_enabled as _debug_is_enabled
+from memory_agent.debug import reset_session_stats as _reset_token_stats
+from memory_agent.debug import get_session_stats as _get_token_stats
 from memory_agent.storage import MemoryStore
 from memory_agent.agent_loop import run_agent_loop
 from memory_agent.extractor import extract_and_store
 from memory_agent.tools import set_workspace_root, reset_session_state, pre_index_skills
+from memory_agent import __version__
 from memory_agent.commands import handle_slash_command
 
 
@@ -112,6 +116,29 @@ def _bash_confirm(tool_name: str, arguments: dict) -> tuple[bool, str]:
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
 
+def _print_token_stats() -> None:
+    """Print accumulated per-conversation token usage to stderr."""
+    import sys
+    stats = _get_token_stats()
+    if stats["llm_call_count"] == 0:
+        return
+    cache_rate = ""
+    if stats["prompt_tokens"] > 0 and stats["cached_tokens"] > 0:
+        rate = stats["cached_tokens"] / stats["prompt_tokens"] * 100
+        cache_rate = f"\n  Cache hit rate:    {rate:.1f}%"
+    print(
+        f"\n{'='*50}",
+        f"📊 Token usage this conversation:",
+        f"  LLM calls:         {stats['llm_call_count']}",
+        f"  Prompt tokens:     {stats['prompt_tokens']:,}",
+        f"  Completion tokens: {stats['completion_tokens']:,}",
+        f"  Total tokens:      {stats['total_tokens']:,}",
+        f"  Cached tokens:     {stats['cached_tokens']:,}{cache_rate}",
+        f"{'='*50}\n",
+        sep="\n", file=sys.stderr,
+    )
+
+
 def run_pipeline(
     user_query: str,
     config: Config,
@@ -119,9 +146,14 @@ def run_pipeline(
     *,
     skip_memory: bool = False,
     skip_extract: bool = False,
+    manual_extract: bool = False,
     interactive: bool = False,
 ) -> None:
     """Execute the full 3-step pipeline for a single conversation turn."""
+
+    # Reset per-conversation token counters (debug mode)
+    if _debug_is_enabled():
+        _reset_token_stats()
 
     # Step 1: Initialize session state + pre-index skills (no prompt injection)
     injected_memories: list[dict] = []
@@ -154,9 +186,16 @@ def run_pipeline(
     if not skip_extract:
         print(file=sys.stderr)
         try:
-            extract_and_store(transcript=transcript, config=config, store=store)
+            extract_and_store(
+                transcript=transcript, config=config, store=store,
+                auto_confirm=not manual_extract,
+            )
         except Exception as e:
             print(f"Memory extraction failed: {e}", file=sys.stderr)
+
+    # Print per-conversation token stats (debug mode)
+    if _debug_is_enabled():
+        _print_token_stats()
 
 
 # ── interactive mode ─────────────────────────────────────────────────────────
@@ -172,7 +211,13 @@ _BANNER = r"""
 """
 
 
-def _interactive_loop(config: Config, store: MemoryStore):
+def _interactive_loop(
+    config: Config, store: MemoryStore,
+    *,
+    skip_memory: bool = False,
+    skip_extract: bool = False,
+    manual_extract: bool = False,
+):
     """Run the interactive REPL."""
     _setup_readline()
     readline.set_completer(_completer)
@@ -212,6 +257,9 @@ def _interactive_loop(config: Config, store: MemoryStore):
 
         run_pipeline(
             user_input, config, store,
+            skip_memory=skip_memory,
+            skip_extract=skip_extract,
+            manual_extract=manual_extract,
             interactive=True,
         )
 
@@ -221,6 +269,10 @@ def _interactive_loop(config: Config, store: MemoryStore):
 def main():
     parser = argparse.ArgumentParser(
         description="Memory Agent — AI assistant with persistent memory"
+    )
+    parser.add_argument(
+        "-v", "--version", action="version",
+        version=f"memory-agent {__version__}",
     )
     parser.add_argument(
         "query", nargs="*",
@@ -237,6 +289,11 @@ def main():
     parser.add_argument(
         "--no-extract", action="store_true",
         help="Skip memory extraction after the conversation",
+    )
+    parser.add_argument(
+        "--manual-extract", action="store_true",
+        help="Prompt for save/edit/discard on each extracted memory "
+             "(default: auto-save without asking)",
     )
     parser.add_argument(
         "--debug", action="store_true",
@@ -307,11 +364,17 @@ def main():
             user_query, config, store,
             skip_memory=args.no_memory,
             skip_extract=args.no_extract,
+            manual_extract=args.manual_extract,
             interactive=False,
         )
     else:
         # Interactive REPL — bash confirmation enabled
-        _interactive_loop(config, store)
+        _interactive_loop(
+            config, store,
+            skip_memory=args.no_memory,
+            skip_extract=args.no_extract,
+            manual_extract=args.manual_extract,
+        )
 
 
 if __name__ == "__main__":
