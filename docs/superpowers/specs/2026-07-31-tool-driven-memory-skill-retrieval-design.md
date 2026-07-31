@@ -21,7 +21,7 @@
 | 决策 | 选择 |
 |------|------|
 | Pre-loop 检索 | 完全移除，改为工具驱动 |
-| Skill 工具拆分 | 三个独立工具：`search_skills` / `load_skill` / `list_skills` |
+| Skill 工具暴露 | 仅暴露 `search_skills`；`load_skill` / `list_skills` 内部实现，暂不注册 |
 | System prompt 变化 | 每轮动态更新（Round 1 vs Round 2+） |
 | 去重层面 | 工具层透明去重（session 级 ID set） |
 | 简单任务 | LLM 自行判断，可跳过检索直接执行 |
@@ -65,7 +65,9 @@ User Query
 
 ## Tool Design
 
-### Tool Inventory (10 tools total)
+### Tool Inventory (8 exposed + 2 internal)
+
+**暴露给 LLM 的工具 (8个)：**
 
 | 工具 | 状态 | 用途 |
 |------|------|------|
@@ -76,35 +78,38 @@ User Query
 | `git_ops` | 不变 | 安全 git 操作 |
 | `run_bash` | 不变 | 执行 shell 命令 |
 | `search_memory` | **增强** | embedding 检索历史记忆，带去重 |
-| `search_skills` | **新增** | embedding 语义匹配 skill，带去重 |
-| `load_skill` | 不变 | 按名称加载完整 SKILL.md |
-| `list_skills` | **新增** | 列出所有 skill 摘要 |
+| `search_skills` | **新增** | embedding 语义匹配 skill，返回匹配 skill 的完整内容，带去重 |
+
+**内部实现，暂不暴露 (2个)：**
+
+| 函数 | 用途 |
+|------|------|
+| `load_skill` | 按名称加载完整 SKILL.md |
+| `list_skills` | 列出所有 skill 摘要 |
 
 ### New Tool: `search_skills`
 
 ```
 Description: Search for relevant skills using semantic matching.
-             Returns skill names, descriptions, and relevance scores.
-             Use load_skill(name) afterwards to get full instructions.
+             Returns the full content of matched skills (name, description,
+             full instructions), sorted by relevance score.
+             Use this to discover and immediately apply specialized workflows.
 
 Parameters:
   query (string, required): What kind of skill or capability you need
   top_k (integer, optional): Number of results (default: 3)
 
-Returns: [{name, description, source, score}], sorted by relevance.
+Returns: For each matched skill: {name, description, source, score, content}.
          Already-returned skills are filtered out (dedup).
+         The 'content' field contains the full SKILL.md text, so no separate
+         load step is needed.
 ```
 
-### New Tool: `list_skills`
+### Internal Functions (not exposed as tools)
 
-```
-Description: List all installed skills with their summaries.
-             Prefer search_skills for targeted matching when many skills are installed.
+**`load_skill(name)`** — Load full SKILL.md content for a specific skill by name. Implemented and available for internal use; not registered in TOOL_DEFINITIONS.
 
-Parameters: none
-
-Returns: List of all installed skills with name, source, and description.
-```
+**`list_skills()`** — List all installed skills with summaries. Implemented and available for internal use; not registered in TOOL_DEFINITIONS.
 
 ### Enhanced Tool: `search_memory`
 
@@ -131,8 +136,8 @@ search_skills execution:
   4. Return filtered results
   5. If all filtered: prompt to try different query terms
 
-load_skill: also adds loaded skill name to _returned_skill_names
-list_skills: does NOT add to dedup set (informational listing)
+load_skill (internal): also adds loaded skill name to _returned_skill_names
+list_skills (internal): does NOT add to dedup set (informational listing)
 ```
 
 Dedup is transparent to the LLM — it doesn't need to track IDs. The tools silently filter duplicates.
@@ -156,8 +161,7 @@ Before diving into the task, analyze what the user is asking:
    call search_memory(query) with specific search terms to find relevant memories.
 
 2. **Need specialized skills or workflows?**
-   Call search_skills(query) to find matching skills, or list_skills()
-   to see all available skills. Then use load_skill(name) for full instructions.
+   Call search_skills(query) to find matching skills with their full instructions.
 
 3. **Simple, self-contained tasks** (e.g., "write hello world", "what is 2+2")
    can be executed directly — skip retrieval.
@@ -173,8 +177,7 @@ from tool calls earlier in this conversation.
 
 If you discover gaps and need more:
 - search_memory(query) — search past conversations
-- search_skills(query) — find additional skills
-- load_skill(name) — load full skill instructions
+- search_skills(query) — find additional skills with full instructions
 ```
 
 ### Switching Mechanism
