@@ -1,16 +1,15 @@
-"""Debug logging for HTTP API calls. Enable via --debug flag or DEBUG=true env."""
+"""Debug logging for HTTP API calls. Enable via --debug flag."""
 
 import json
-import os
-import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 _debug_enabled = False
 _debug_file: Path | None = None
 _lock = threading.Lock()
+
+_SEPARATOR = "─" * 70
 
 
 def enable(memory_dir: Path) -> None:
@@ -19,6 +18,9 @@ def enable(memory_dir: Path) -> None:
     _debug_enabled = True
     memory_dir.mkdir(parents=True, exist_ok=True)
     _debug_file = memory_dir / "debug.log"
+    _write_raw(f"\n{'═' * 70}\n")
+    _write_raw(f"  Debug session started: {datetime.now(timezone.utc).isoformat()}\n")
+    _write_raw(f"{'═' * 70}\n\n")
 
 
 def disable() -> None:
@@ -30,17 +32,29 @@ def is_enabled() -> bool:
     return _debug_enabled
 
 
-def _write(entry: dict) -> None:
-    """Append a JSON-line entry to the debug log."""
+def _write_raw(text: str) -> None:
     if not _debug_enabled or _debug_file is None:
         return
     with _lock:
         try:
-            line = json.dumps(entry, ensure_ascii=False, default=str)
             with open(_debug_file, "a") as f:
-                f.write(line + "\n")
+                f.write(text)
         except Exception:
             pass
+
+
+def _pretty_json(obj) -> str:
+    """Format an object as indented JSON, truncating very large strings."""
+    if obj is None:
+        return "(none)"
+    try:
+        formatted = json.dumps(obj, ensure_ascii=False, indent=2, default=str)
+        # Truncate if excessively large (>16KB)
+        if len(formatted) > 16384:
+            formatted = formatted[:16384] + "\n... (truncated)"
+        return formatted
+    except Exception:
+        return str(obj)
 
 
 def _sanitize_headers(headers: dict) -> dict:
@@ -48,14 +62,11 @@ def _sanitize_headers(headers: dict) -> dict:
     if not headers:
         return {}
     sanitized = dict(headers)
-    if "authorization" in sanitized:
-        v = sanitized["authorization"]
-        if v.startswith("Bearer "):
-            sanitized["authorization"] = f"Bearer ...{v[-8:]}"
-    if "Authorization" in sanitized:
-        v = sanitized["Authorization"]
-        if v.startswith("Bearer "):
-            sanitized["Authorization"] = f"Bearer ...{v[-8:]}"
+    for key in ("authorization", "Authorization"):
+        if key in sanitized:
+            v = sanitized[key]
+            if v.startswith("Bearer "):
+                sanitized[key] = f"Bearer ...{v[-8:]}"
     return sanitized
 
 
@@ -70,16 +81,20 @@ def log_request(
 ) -> str:
     """Log an outgoing HTTP request. Returns a request_id for matching the response."""
     request_id = datetime.now(timezone.utc).strftime("%H%M%S-%f")[:15]
-    _write({
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "type": "request",
-        "id": request_id,
-        "module": module,
-        "method": method,
-        "url": url,
-        "headers": _sanitize_headers(headers or {}),
-        "body": body,
-    })
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+    lines = [
+        _SEPARATOR,
+        f"[{ts}]  REQUEST  {request_id}  module={module}",
+        f"{method}  {url}",
+    ]
+    if headers:
+        lines.append(f"Headers: {_pretty_json(_sanitize_headers(headers))}")
+    if body:
+        lines.append(f"Body:\n{_pretty_json(body)}")
+    lines.append("")
+
+    _write_raw("\n".join(lines))
     return request_id
 
 
@@ -90,14 +105,17 @@ def log_response(
     error: str | None = None,
 ) -> None:
     """Log an HTTP response, matched to its request."""
-    entry: dict = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "type": "response",
-        "id": request_id,
-        "status": status_code,
-    }
-    if body is not None:
-        entry["body"] = body
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    status_icon = "✓" if 200 <= status_code < 300 else "✗"
+
+    lines = [
+        f"[{ts}]  RESPONSE  {request_id}  {status_icon} HTTP {status_code}",
+    ]
     if error:
-        entry["error"] = error
-    _write(entry)
+        lines.append(f"ERROR: {error}")
+    if body is not None:
+        lines.append(f"Body:\n{_pretty_json(body)}")
+    lines.append(_SEPARATOR)
+    lines.append("")  # blank line between pairs
+
+    _write_raw("\n".join(lines))
