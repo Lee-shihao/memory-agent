@@ -247,7 +247,39 @@ def main():
         "--debug", action="store_true",
         help="Log all HTTP API calls to .agent-memory/debug.log",
     )
+
+    # Skill management
+    skill_group = parser.add_argument_group("Skill management")
+    skill_group.add_argument(
+        "--skill-list", action="store_true",
+        help="List installed skills and exit",
+    )
+    skill_group.add_argument(
+        "--skill-install", type=str, metavar="SOURCE",
+        help="Install a skill from a local directory or git URL",
+    )
+    skill_group.add_argument(
+        "--skill-dir", type=str, metavar="DIR",
+        help="Additional skill directory to search",
+    )
     args = parser.parse_args()
+
+    # Handle --skill-dir (register before any skill operations)
+    if args.skill_dir:
+        from memory_agent.skills import add_search_path
+        for d in args.skill_dir.split(":"):
+            add_search_path(d)
+
+    # Handle skill management commands (exit after processing)
+    if args.skill_list:
+        from memory_agent.skills import list_installed_skills
+        print(list_installed_skills())
+        return
+    if args.skill_install:
+        from memory_agent.skills import install_skill
+        project_root = args.project.resolve()
+        print(install_skill(args.skill_install, project_root))
+        return
 
     if args.query:
         user_query = " ".join(args.query)
