@@ -41,16 +41,20 @@ Agent 会自动检索相关历史记忆并注入上下文。
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ Step 1: 记忆检索（Retriever）                         │
-│   LLM 判断是否需要检索 → 语义匹配 + 时间序匹配 → 注入  │
+│ Step 1: 会话初始化（Session Init）                    │
+│   去重状态重置 → skill 索引预热（不注入 prompt）       │
 ├─────────────────────────────────────────────────────┤
-│ Step 2: Agent Loop                                 │
-│   带记忆上下文的 tool-calling 迭代，直到任务完成       │
+│ Step 2: Agent Loop（工具驱动检索）                    │
+│   Round 1: LLM 分析任务 → 按需调用 search_memory /    │
+│            search_skills 获取上下文 → 执行任务        │
+│   Round 2+: 聚焦任务，已有上下文不够时继续搜索          │
 ├─────────────────────────────────────────────────────┤
 │ Step 3: 记忆提取（Extractor）                        │
 │   LLM 提取摘要/标签/实体 → 用户审核 → 存入向量库       │
 └─────────────────────────────────────────────────────┘
 ```
+
+**与旧版的区别：** 记忆和 skill 不再预注入 system prompt，而是 LLM 通过 `search_memory` / `search_skills` 工具按需获取，内容通过工具返回流入对话。去重由工具层透明处理。
 
 ## 常用命令
 
@@ -121,15 +125,16 @@ pytest tests/ -v
 
 ```
 src/memory_agent/
-├── cli.py          # 入口：三步走编排
+├── cli.py          # 入口：会话初始化 + Agent Loop + 记忆提取
 ├── config.py       # 配置加载、环境变量替换
 ├── storage.py      # SQLite + ChromaDB 存储层
-├── retriever.py    # LLM 决策 + 双通道检索
-├── agent_loop.py   # OpenAI 兼容 API + tool calling
+├── retriever.py    # LLM 决策 + 双通道检索（供 /memory 命令使用）
+├── agent_loop.py   # OpenAI 兼容 API + 动态 system prompt + tool calling
 ├── extractor.py    # 对话后记忆提取 + 用户审核
-├── tools.py        # 内置工具（read_file / write_file / run_bash）
+├── tools.py        # 内置工具（含 search_memory / search_skills + 去重）
+├── skills.py       # Skill 发现、SkillRouter embedding 检索
 ├── commands.py     # /memory 系列命令
-└── prompts.py      # Prompt 模板
+└── prompts.py      # Prompt 模板（含动态 ROUND_1 / ROUND_2+ 提示词）
 ```
 
 ## 技术栈
