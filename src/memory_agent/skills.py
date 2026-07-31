@@ -5,9 +5,8 @@ contains a SKILL.md with the skill instructions.
 
 Search paths (in order):
   1. <project>/.agent-memory/skills/
-  2. <project>/.claude/skills/
-  3. ~/.claude/skills/
-  4. ~/.memory_agent/skills/
+  2. ~/.memory_agent/skills/
+  3. Any extra paths added via --skill-dir
 """
 
 import os
@@ -54,8 +53,6 @@ def _search_paths(project_root: Path | None = None) -> list[Path]:
         project_root = _project_root()
     paths = [
         project_root / ".agent-memory" / "skills",
-        project_root / ".claude" / "skills",
-        Path.home() / ".claude" / "skills",
         Path.home() / ".memory_agent" / "skills",
     ]
     paths.extend(_extra_search_paths)
