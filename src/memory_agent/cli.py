@@ -8,6 +8,7 @@ import atexit
 import os
 import readline
 import sys
+import threading
 from pathlib import Path
 
 from memory_agent.config import load_config, Config
@@ -31,8 +32,6 @@ def _setup_readline():
         readline.parse_and_bind("tab: complete")
     except Exception:
         pass
-
-    # Load history
     try:
         readline.read_history_file(_HISTORY_FILE)
     except FileNotFoundError:
@@ -44,22 +43,72 @@ def _completer(text: str, state: int) -> str | None:
     """Tab-completion for /memory subcommands."""
     line = readline.get_line_buffer()
     stripped = line.lstrip()
-
-    # Complete /memory subcommands
     if stripped.startswith("/memory"):
         parts = stripped.split(maxsplit=1)
         if len(parts) == 1 and not stripped.endswith(" "):
-            # Completing "/memory" itself
             options = ["/memory "]
             if state < len(options):
                 return options[state]
         elif len(parts) == 2:
-            # Completing subcommand
             prefix = parts[1] if not stripped.endswith(" ") else ""
             matches = [cmd for cmd in _MEMORY_SUBCOMMANDS if cmd.startswith(prefix)]
             if state < len(matches):
                 return parts[0] + " " + matches[state]
     return None
+
+
+# ── bash confirmation ────────────────────────────────────────────────────────
+
+_CONFIRM_TIMEOUT = 30  # seconds
+
+
+def _bash_confirm(tool_name: str, arguments: dict) -> tuple[bool, str]:
+    """Confirm before executing bash commands. Timeout → auto-allow."""
+
+    # Only confirm bash — read/write pass through
+    if tool_name != "run_bash":
+        return True, ""
+
+    command = arguments.get("command", "")
+    timeout = arguments.get("timeout", 120)
+
+    # Truncate long commands for display
+    display_cmd = command if len(command) <= 200 else command[:197] + "..."
+
+    print(f"\n  🔧 run_bash  (timeout: {timeout}s)", file=sys.stderr)
+    print(f"  {display_cmd}", file=sys.stderr)
+    print(f"  [y] allow  [n] deny  or type feedback  ({_CONFIRM_TIMEOUT}s timeout → auto-allow)",
+          file=sys.stderr, end="", flush=True)
+
+    response: list[str | None] = [None]
+
+    def _read():
+        try:
+            response[0] = sys.stdin.readline().strip()
+        except (EOFError, OSError):
+            response[0] = ""
+
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    t.join(timeout=_CONFIRM_TIMEOUT)
+
+    if t.is_alive():
+        # Timeout — auto-allow, no feedback
+        print("  ⏰ (timeout, auto-allowed)", file=sys.stderr)
+        return True, ""
+
+    user_input = response[0] or ""
+    print(file=sys.stderr)
+
+    lowered = user_input.lower()
+
+    if lowered in ("y", "yes", ""):
+        return True, ""
+    elif lowered in ("n", "no"):
+        return False, ""
+    else:
+        # Treat as feedback — allow with user note
+        return True, user_input
 
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
@@ -71,6 +120,7 @@ def run_pipeline(
     *,
     skip_memory: bool = False,
     skip_extract: bool = False,
+    interactive: bool = False,
 ) -> None:
     """Execute the full 3-step pipeline for a single conversation turn."""
 
@@ -100,6 +150,7 @@ def run_pipeline(
         config=config,
         user_query=user_query,
         memory_context=memory_context,
+        confirm_callback=_bash_confirm if interactive else None,
     )
     print(transcript)
 
@@ -132,10 +183,6 @@ def _interactive_loop(config: Config, store: MemoryStore):
 
     print(_BANNER, file=sys.stderr)
 
-    # Per-session flags
-    skip_memory = False
-    skip_extract = False
-
     while True:
         try:
             prompt = "> "
@@ -147,7 +194,6 @@ def _interactive_loop(config: Config, store: MemoryStore):
         if not user_input:
             continue
 
-        # Meta commands
         if user_input in ("/exit", "/quit", "/q"):
             print("Goodbye.", file=sys.stderr)
             break
@@ -169,11 +215,8 @@ def _interactive_loop(config: Config, store: MemoryStore):
             continue
 
         run_pipeline(
-            user_input,
-            config,
-            store,
-            skip_memory=skip_memory,
-            skip_extract=skip_extract,
+            user_input, config, store,
+            interactive=True,
         )
 
 
@@ -184,29 +227,23 @@ def main():
         description="Memory Agent — AI assistant with persistent memory"
     )
     parser.add_argument(
-        "query",
-        nargs="*",
+        "query", nargs="*",
         help="Your query or task for the agent. Omit to enter interactive mode.",
     )
     parser.add_argument(
-        "-p", "--project",
-        type=Path,
-        default=Path.cwd(),
+        "-p", "--project", type=Path, default=Path.cwd(),
         help="Project root directory (default: current directory)",
     )
     parser.add_argument(
-        "--no-memory",
-        action="store_true",
+        "--no-memory", action="store_true",
         help="Skip memory retrieval for this invocation",
     )
     parser.add_argument(
-        "--no-extract",
-        action="store_true",
+        "--no-extract", action="store_true",
         help="Skip memory extraction after the conversation",
     )
     args = parser.parse_args()
 
-    # Collect query from args or stdin
     if args.query:
         user_query = " ".join(args.query)
     elif not sys.stdin.isatty():
@@ -229,16 +266,15 @@ def main():
     )
 
     if user_query:
-        # Single-shot mode
+        # Single-shot mode — no bash confirmation (batch run)
         run_pipeline(
-            user_query,
-            config,
-            store,
+            user_query, config, store,
             skip_memory=args.no_memory,
             skip_extract=args.no_extract,
+            interactive=False,
         )
     else:
-        # Interactive REPL mode
+        # Interactive REPL — bash confirmation enabled
         _interactive_loop(config, store)
 
 
