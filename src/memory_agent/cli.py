@@ -125,7 +125,6 @@ def run_pipeline(
 
     # Step 1: Initialize session state + pre-index skills (no prompt injection)
     injected_memories: list[dict] = []
-    combined_context = ""
 
     reset_session_state()
 
