@@ -53,8 +53,23 @@ def run_agent_loop(
         }
         if _debug_enabled():
             rid = _log_req("agent_loop", "POST", url, req_headers, req_body)
-        response = httpx.post(url, headers=req_headers, json=req_body, timeout=120)
-        response.raise_for_status()
+
+        try:
+            response = httpx.post(url, headers=req_headers, json=req_body, timeout=120)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            transcript_parts.append(
+                f"Assistant: [API error {e.response.status_code}] "
+                f"LLM returned an error — please check your API key and network, then retry."
+            )
+            return "\n\n".join(transcript_parts)
+        except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError) as e:
+            transcript_parts.append(
+                f"Assistant: [Connection error] "
+                f"Cannot reach {config.llm_api_base} — {e}"
+            )
+            return "\n\n".join(transcript_parts)
+
         data = response.json()
         if _debug_enabled():
             _log_resp(rid, response.status_code, data)

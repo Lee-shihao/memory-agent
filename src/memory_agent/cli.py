@@ -7,8 +7,8 @@ import argparse
 import atexit
 import os
 import readline
+import select
 import sys
-import threading
 from pathlib import Path
 
 from memory_agent.config import load_config, Config
@@ -64,52 +64,51 @@ _CONFIRM_TIMEOUT = 30  # seconds
 
 
 def _bash_confirm(tool_name: str, arguments: dict) -> tuple[bool, str]:
-    """Confirm before executing bash commands. Timeout → auto-allow."""
+    """Confirm before executing bash commands. Timeout → auto-allow.
 
-    # Only confirm bash — read/write pass through
+    Uses select() on stdin for reliable timeout — avoids threading conflicts
+    with readline that would cause user input to be lost.
+    """
+
     if tool_name != "run_bash":
         return True, ""
 
     command = arguments.get("command", "")
-    timeout = arguments.get("timeout", 120)
-
-    # Truncate long commands for display
+    tool_timeout = arguments.get("timeout", 120)
     display_cmd = command if len(command) <= 200 else command[:197] + "..."
 
-    print(f"\n  🔧 run_bash  (timeout: {timeout}s)", file=sys.stderr)
+    print(f"\n  🔧 run_bash  (timeout: {tool_timeout}s)", file=sys.stderr)
     print(f"  {display_cmd}", file=sys.stderr)
-    print(f"  [y] allow  [n] deny  or type feedback  ({_CONFIRM_TIMEOUT}s timeout → auto-allow)",
-          file=sys.stderr, end="", flush=True)
+    print(
+        f"  [y] allow  [n] deny  or type feedback  "
+        f"({_CONFIRM_TIMEOUT}s timeout → auto-allow) ",
+        file=sys.stderr, end="", flush=True,
+    )
 
-    response: list[str | None] = [None]
+    # Wait for input with timeout — runs on main thread, no threading issues
+    ready, _, _ = select.select([sys.stdin], [], [], _CONFIRM_TIMEOUT)
 
-    def _read():
-        try:
-            response[0] = sys.stdin.readline().strip()
-        except (EOFError, OSError):
-            response[0] = ""
-
-    t = threading.Thread(target=_read, daemon=True)
-    t.start()
-    t.join(timeout=_CONFIRM_TIMEOUT)
-
-    if t.is_alive():
-        # Timeout — auto-allow, no feedback
+    if not ready:
         print("  ⏰ (timeout, auto-allowed)", file=sys.stderr)
         return True, ""
 
-    user_input = response[0] or ""
+    try:
+        user_input = sys.stdin.readline().strip()
+    except (EOFError, OSError):
+        user_input = ""
+
     print(file=sys.stderr)
 
-    lowered = user_input.lower()
+    if not user_input:
+        return True, ""
 
-    if lowered in ("y", "yes", ""):
+    lowered = user_input.lower()
+    if lowered in ("y", "yes"):
         return True, ""
     elif lowered in ("n", "no"):
         return False, ""
     else:
-        # Treat as feedback — allow with user note
-        return True, user_input
+        return True, user_input  # feedback
 
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
