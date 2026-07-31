@@ -5,6 +5,39 @@ import re
 import subprocess
 from pathlib import Path
 
+# ── session state (dedup tracking) ────────────────────────────────────────────
+
+_returned_memory_ids: set[str] = set()
+_returned_skill_names: set[str] = set()
+
+
+def reset_session_state() -> None:
+    """Reset dedup state at the beginning of each pipeline invocation."""
+    global _returned_memory_ids, _returned_skill_names
+    _returned_memory_ids.clear()
+    _returned_skill_names.clear()
+
+
+def pre_index_skills(config) -> None:
+    """Ensure all skills are indexed in ChromaDB before the agent loop.
+
+    Does NOT inject skills into the system prompt — only indexes them so
+    search_skills can find them via embedding lookup.
+    """
+    from memory_agent.skills import SkillRouter, discover_skills
+
+    skills = discover_skills(config.memory_dir.parent)
+    if not skills:
+        return
+
+    router = SkillRouter(
+        chroma_dir=config.memory_dir / "chroma",
+        embedding_api_base=config.embedding_api_base,
+        embedding_api_key=config.embedding_api_key,
+        embedding_model=config.embedding_model,
+    )
+    router.index_skills(skills)
+
 _workspace_root = Path.cwd()
 
 
@@ -256,6 +289,92 @@ def tool_load_skill(name: str = "") -> str:
     )
 
 
+# ── search_skills ─────────────────────────────────────────────────────────────
+
+def tool_search_skills(query: str, top_k: int = 3) -> str:
+    """Search for relevant skills using embedding-based semantic matching.
+
+    Returns full skill content for matched skills, filtered by dedup state.
+    """
+    from memory_agent.skills import SkillRouter, discover_skills, get_skill
+    from memory_agent.config import load_config
+
+    config = load_config(_workspace_root)
+
+    # Discover and index skills
+    skills = discover_skills(config.memory_dir.parent)
+    if not skills:
+        return "No skills installed. Use the skill management commands to install skills."
+
+    router = SkillRouter(
+        chroma_dir=config.memory_dir / "chroma",
+        embedding_api_base=config.embedding_api_base,
+        embedding_api_key=config.embedding_api_key,
+        embedding_model=config.embedding_model,
+    )
+    router.index_skills(skills)
+
+    if router._collection.count() == 0:
+        return "No skills indexed."
+
+    try:
+        raw_results = router.search(query, top_k=top_k)
+    except Exception as e:
+        return f"Skill search failed: {e}"
+
+    # Filter by dedup state
+    new_results = []
+    for r in raw_results:
+        if r["name"] not in _returned_skill_names:
+            new_results.append(r)
+
+    if not new_results:
+        return (
+            "No new skills found for this query. "
+            "Previously matched skills have already been returned. "
+            "Try a different query to find additional skills."
+        )
+
+    # Track returned names
+    for r in new_results:
+        _returned_skill_names.add(r["name"])
+
+    # Load full content for each matched skill
+    lines = [f"Skill search results for '{query}':\n"]
+    for i, r in enumerate(new_results):
+        dist = r.get("distance")
+        score = f" (score: {1 - dist:.2f})" if dist is not None else ""
+        lines.append(f"## {r['name']}{score}")
+        lines.append(f"**Description:** {r['description']}")
+        lines.append(f"**Source:** {r['source']}")
+
+        # Load full SKILL.md content
+        skill = get_skill(r["name"])
+        if skill:
+            lines.append(f"\n{skill.load()}")
+        else:
+            lines.append("\n(Full instructions not available)")
+
+        if i < len(new_results) - 1:
+            lines.append("\n---\n")
+
+    return "\n".join(lines)
+
+
+def _list_skills() -> str:
+    """List all installed skills with summaries (internal, not exposed as tool)."""
+    from memory_agent.skills import discover_skills
+
+    skills = discover_skills(_workspace_root)
+    if not skills:
+        return "No skills installed."
+
+    lines = [f"Installed skills ({len(skills)}):\n"]
+    for s in skills:
+        lines.append(f"  - **{s.name}** ({s.source}): {s.description}")
+    return "\n".join(lines)
+
+
 # ── search_memory ─────────────────────────────────────────────────────────────
 
 def tool_search_memory(query: str, top_k: int = 5) -> str:
@@ -284,8 +403,28 @@ def tool_search_memory(query: str, top_k: int = 5) -> str:
     if not results:
         return f"No memories found matching: {query}"
 
-    lines = [f"Memory search results for '{query}':\n"]
+    # Filter by dedup state
+    new_results = []
     for r in results:
+        mid = r.get("memory_id", "?")
+        if mid not in _returned_memory_ids:
+            new_results.append(r)
+
+    if not new_results:
+        return (
+            "No new memories found for this query. "
+            "Previously matched memories have already been returned. "
+            "Try a different query or check /memory recent for time-based retrieval."
+        )
+
+    # Track returned IDs
+    for r in new_results:
+        mid = r.get("memory_id", "?")
+        if mid != "?":
+            _returned_memory_ids.add(mid)
+
+    lines = [f"Memory search results for '{query}':\n"]
+    for r in new_results:
         mid = r.get("memory_id", "?")
         text = r.get("text", "")[:200]
         dist = r.get("distance")
@@ -458,6 +597,32 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_skills",
+            "description": (
+                "Search for relevant skills using semantic matching. "
+                "Returns the full content of matched skills (name, description, "
+                "full instructions), sorted by relevance score. "
+                "Use this to discover and immediately apply specialized workflows."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What kind of skill or capability you need",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results (default: 3)",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
 ]
 
 TOOL_EXECUTORS = {
@@ -469,6 +634,7 @@ TOOL_EXECUTORS = {
     "run_bash": tool_run_bash,
     "load_skill": tool_load_skill,
     "search_memory": tool_search_memory,
+    "search_skills": tool_search_skills,
 }
 
 

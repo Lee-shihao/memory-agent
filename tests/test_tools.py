@@ -109,7 +109,7 @@ class TestSearchMemoryDedup:
             {"memory_id": "mem-3", "text": "New result", "distance": 0.4},
         ]
 
-        with patch("memory_agent.tools.MemoryStore") as MockStore:
+        with patch("memory_agent.storage.MemoryStore") as MockStore:
             mock_store = MockStore.return_value
             mock_store.query_chroma.side_effect = [mock_results1, mock_results2]
             mock_store._chroma_collection = MagicMock()
@@ -136,7 +136,7 @@ class TestSessionState:
             {"memory_id": "mem-1", "text": "Test", "distance": 0.1},
         ]
 
-        with patch("memory_agent.tools.MemoryStore") as MockStore:
+        with patch("memory_agent.storage.MemoryStore") as MockStore:
             mock_store = MockStore.return_value
             mock_store.query_chroma.return_value = mock_results
             mock_store._chroma_collection = MagicMock()
