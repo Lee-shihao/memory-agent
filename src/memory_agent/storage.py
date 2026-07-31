@@ -8,6 +8,9 @@ from pathlib import Path
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
+from memory_agent.debug import is_enabled as _debug_enabled
+from memory_agent.debug import log_request as _log_req
+from memory_agent.debug import log_response as _log_resp
 
 
 SCHEMA_SQL = """
@@ -87,17 +90,19 @@ class MemoryStore:
 
     def _get_embedding(self, text: str) -> list[float]:
         import httpx
-        response = httpx.post(
-            f"{self._embedding_api_base}/embeddings",
-            headers={
-                "Authorization": f"Bearer {self._embedding_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={"model": self._embedding_model, "input": text},
-            timeout=30,
-        )
+        url = f"{self._embedding_api_base}/embeddings"
+        req_headers = {
+            "Authorization": f"Bearer {self._embedding_api_key}",
+            "Content-Type": "application/json",
+        }
+        req_body = {"model": self._embedding_model, "input": text}
+        if _debug_enabled():
+            rid = _log_req("storage", "POST", url, req_headers, req_body)
+        response = httpx.post(url, headers=req_headers, json=req_body, timeout=30)
         response.raise_for_status()
         data = response.json()
+        if _debug_enabled():
+            _log_resp(rid, response.status_code, data)
         return data["data"][0]["embedding"]
 
     def add_to_chroma(self, memory_id, text, metadata) -> str:

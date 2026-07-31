@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import httpx
 from memory_agent.config import Config
+from memory_agent.debug import is_enabled as _debug_enabled
+from memory_agent.debug import log_request as _log_req
+from memory_agent.debug import log_response as _log_resp
 from memory_agent.storage import MemoryStore
 from memory_agent.prompts import EXTRACTOR_SYSTEM_PROMPT, EXTRACTOR_USER_TEMPLATE
 
@@ -27,21 +30,23 @@ class ExtractionResult:
 
 
 def _call_extraction_llm(config: Config, transcript: str) -> ExtractionResult:
-    response = httpx.post(
-        f"{config.llm_api_base}/chat/completions",
-        headers={"Authorization": f"Bearer {config.llm_api_key}", "Content-Type": "application/json"},
-        json={
-            "model": config.llm_model,
-            "messages": [
-                {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
-                {"role": "user", "content": EXTRACTOR_USER_TEMPLATE.format(transcript=transcript)},
-            ],
-            "temperature": 0.3, "max_tokens": 1000,
-        },
-        timeout=60,
-    )
+    url = f"{config.llm_api_base}/chat/completions"
+    req_headers = {"Authorization": f"Bearer {config.llm_api_key}", "Content-Type": "application/json"}
+    req_body = {
+        "model": config.llm_model,
+        "messages": [
+            {"role": "system", "content": EXTRACTOR_SYSTEM_PROMPT},
+            {"role": "user", "content": EXTRACTOR_USER_TEMPLATE.format(transcript=transcript)},
+        ],
+        "temperature": 0.3, "max_tokens": 1000,
+    }
+    if _debug_enabled():
+        rid = _log_req("extractor", "POST", url, req_headers, req_body)
+    response = httpx.post(url, headers=req_headers, json=req_body, timeout=60)
     response.raise_for_status()
     data = response.json()
+    if _debug_enabled():
+        _log_resp(rid, response.status_code, data)
     content = data["choices"][0]["message"]["content"]
     return ExtractionResult.from_dict(json.loads(content))
 

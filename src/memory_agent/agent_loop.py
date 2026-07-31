@@ -5,6 +5,9 @@ from collections.abc import Callable
 import httpx
 
 from memory_agent.config import Config
+from memory_agent.debug import is_enabled as _debug_enabled
+from memory_agent.debug import log_request as _log_req
+from memory_agent.debug import log_response as _log_resp
 from memory_agent.prompts import BASE_AGENT_SYSTEM_PROMPT
 from memory_agent.tools import TOOL_DEFINITIONS, execute_tool
 
@@ -37,22 +40,24 @@ def run_agent_loop(
     transcript_parts = [f"User: {user_query}"]
 
     for _ in range(max_iterations):
-        response = httpx.post(
-            f"{config.llm_api_base}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {config.llm_api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": config.llm_model,
-                "messages": messages,
-                "tools": tools,
-                "tool_choice": "auto",
-            },
-            timeout=120,
-        )
+        url = f"{config.llm_api_base}/chat/completions"
+        req_body = {
+            "model": config.llm_model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+        }
+        req_headers = {
+            "Authorization": f"Bearer {config.llm_api_key}",
+            "Content-Type": "application/json",
+        }
+        if _debug_enabled():
+            rid = _log_req("agent_loop", "POST", url, req_headers, req_body)
+        response = httpx.post(url, headers=req_headers, json=req_body, timeout=120)
         response.raise_for_status()
         data = response.json()
+        if _debug_enabled():
+            _log_resp(rid, response.status_code, data)
         choice = data["choices"][0]
         message = choice["message"]
         tool_calls = message.get("tool_calls")

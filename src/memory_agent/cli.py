@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 from memory_agent.config import load_config, Config
+from memory_agent.debug import enable as _debug_enable
 from memory_agent.storage import MemoryStore
 from memory_agent.retriever import Retriever
 from memory_agent.agent_loop import run_agent_loop
@@ -242,6 +243,10 @@ def main():
         "--no-extract", action="store_true",
         help="Skip memory extraction after the conversation",
     )
+    parser.add_argument(
+        "--debug", action="store_true",
+        help="Log all HTTP API calls to .agent-memory/debug.log",
+    )
     args = parser.parse_args()
 
     if args.query:
@@ -254,6 +259,10 @@ def main():
     project_root = args.project.resolve()
     set_workspace_root(project_root)
     config = load_config(project_root)
+
+    if args.debug:
+        _debug_enable(config.memory_dir)
+        print(f"Debug logging enabled → {config.memory_dir / 'debug.log'}", file=sys.stderr)
 
     db_path = config.memory_dir / "memories.db"
     store = MemoryStore(db_path)

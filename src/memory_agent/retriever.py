@@ -2,6 +2,9 @@
 import json
 import logging
 from memory_agent.config import Config
+from memory_agent.debug import is_enabled as _debug_enabled
+from memory_agent.debug import log_request as _log_req
+from memory_agent.debug import log_response as _log_resp
 from memory_agent.storage import MemoryStore
 from memory_agent.prompts import (
     RETRIEVAL_DECISION_SYSTEM_PROMPT, RETRIEVAL_DECISION_USER_TEMPLATE,
@@ -70,21 +73,23 @@ class Retriever:
 
     def _llm_decision(self, user_query: str) -> dict:
         import httpx
-        response = httpx.post(
-            f"{self.config.llm_api_base}/chat/completions",
-            headers={"Authorization": f"Bearer {self.config.llm_api_key}", "Content-Type": "application/json"},
-            json={
-                "model": self.config.llm_model,
-                "messages": [
-                    {"role": "system", "content": RETRIEVAL_DECISION_SYSTEM_PROMPT},
-                    {"role": "user", "content": RETRIEVAL_DECISION_USER_TEMPLATE.format(user_query=user_query)},
-                ],
-                "temperature": 0, "max_tokens": 200,
-            },
-            timeout=30,
-        )
+        url = f"{self.config.llm_api_base}/chat/completions"
+        req_headers = {"Authorization": f"Bearer {self.config.llm_api_key}", "Content-Type": "application/json"}
+        req_body = {
+            "model": self.config.llm_model,
+            "messages": [
+                {"role": "system", "content": RETRIEVAL_DECISION_SYSTEM_PROMPT},
+                {"role": "user", "content": RETRIEVAL_DECISION_USER_TEMPLATE.format(user_query=user_query)},
+            ],
+            "temperature": 0, "max_tokens": 200,
+        }
+        if _debug_enabled():
+            rid = _log_req("retriever", "POST", url, req_headers, req_body)
+        response = httpx.post(url, headers=req_headers, json=req_body, timeout=30)
         response.raise_for_status()
         data = response.json()
+        if _debug_enabled():
+            _log_resp(rid, response.status_code, data)
         content = data["choices"][0]["message"]["content"]
         try:
             return json.loads(content)
