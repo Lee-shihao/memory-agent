@@ -67,7 +67,7 @@ class TestFullPipeline:
                 assert memories == []
                 assert context == ""
 
-                transcript = run_agent_loop(config=cfg, user_query="Create a test file", memory_context="")
+                transcript = run_agent_loop(config=cfg, user_query="Create a test file")
                 assert "I've created" in transcript
 
                 result = extract_and_store(transcript=transcript, config=cfg, store=store)

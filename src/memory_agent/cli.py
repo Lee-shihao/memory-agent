@@ -160,11 +160,6 @@ def run_pipeline(
         except Exception as e:
             print(f"  Skill routing failed: {e}", file=sys.stderr)
 
-    # Combine contexts for system prompt
-    combined_context = memory_context
-    if skill_context:
-        combined_context = skill_context + ("\n\n" + memory_context if memory_context else "")
-
     # Handle /memory slash commands
     if user_query.startswith("/memory"):
         is_cmd, response = handle_slash_command(user_query, store, injected_memories)
@@ -177,7 +172,6 @@ def run_pipeline(
     transcript = run_agent_loop(
         config=config,
         user_query=user_query,
-        memory_context=combined_context,
         confirm_callback=_bash_confirm if interactive else None,
     )
     print(transcript)

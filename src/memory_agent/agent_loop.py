@@ -8,7 +8,7 @@ from memory_agent.config import Config
 from memory_agent.debug import is_enabled as _debug_enabled
 from memory_agent.debug import log_request as _log_req
 from memory_agent.debug import log_response as _log_resp
-from memory_agent.prompts import BASE_AGENT_SYSTEM_PROMPT
+from memory_agent.prompts import BASE_AGENT_SYSTEM_PROMPT, ROUND_1_SYSTEM_PROMPT, ROUND_2_PLUS_PROMPT
 from memory_agent.tools import TOOL_DEFINITIONS, execute_tool
 
 # Callback: (tool_name, arguments) -> (allowed: bool, feedback: str)
@@ -20,7 +20,6 @@ ConfirmCallback = Callable[[str, dict], tuple[bool, str]]
 def run_agent_loop(
     config: Config,
     user_query: str,
-    memory_context: str,
     tools: list[dict] | None = None,
     max_iterations: int = 50,
     confirm_callback: ConfirmCallback | None = None,
@@ -28,9 +27,8 @@ def run_agent_loop(
     if tools is None:
         tools = TOOL_DEFINITIONS
 
-    system_content = BASE_AGENT_SYSTEM_PROMPT
-    if memory_context:
-        system_content += "\n\n" + memory_context
+    # Start with Round 1 prompt; it will be updated to Round 2+ after first iteration
+    system_content = ROUND_1_SYSTEM_PROMPT
 
     messages: list[dict] = [
         {"role": "system", "content": system_content},
@@ -39,7 +37,11 @@ def run_agent_loop(
 
     transcript_parts = [f"User: {user_query}"]
 
-    for _ in range(max_iterations):
+    for iteration in range(max_iterations):
+        # --- dynamic prompt switching ---
+        if iteration >= 1:
+            messages[0]["content"] = ROUND_1_SYSTEM_PROMPT + "\n\n" + ROUND_2_PLUS_PROMPT
+
         url = f"{config.llm_api_base}/chat/completions"
         req_body = {
             "model": config.llm_model,
