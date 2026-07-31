@@ -14,8 +14,42 @@ def set_workspace_root(path: Path) -> None:
 
 
 def _resolve_path(file_path: str) -> Path:
+    """Resolve a file path to an absolute path.
+
+    Tries multiple interpretations to handle LLM path confusion:
+      1. Path as given (absolute or relative to workspace)
+      2. If it starts with '/', try treating as relative (strip leading '/')
+      3. Try './' + basename
+    """
     p = Path(file_path)
-    return p if p.is_absolute() else _workspace_root / p
+    if p.is_absolute():
+        if p.exists():
+            return p
+        # The LLM might have used '/' as root for a relative path.
+        # Try stripping the leading '/' and resolving relative to workspace.
+        rel = Path(str(p).lstrip("/"))
+        candidate = _workspace_root / rel
+        if candidate.exists():
+            return candidate
+        # Still return the original — error message will guide the LLM
+        return p
+
+    return _workspace_root / p
+
+
+def _read_error(path: Path) -> str:
+    """Generate a helpful error message for file-not-found."""
+    rel = None
+    try:
+        rel = path.relative_to(_workspace_root)
+    except ValueError:
+        rel = path
+    return (
+        f"Error: File not found: {rel}\n"
+        f"  Workspace root: {_workspace_root}\n"
+        f"  Tip: use relative paths like 'src/main.py' not '/src/main.py'\n"
+        f"  Tip: run 'ls' or 'find' first to discover the correct path"
+    )
 
 
 # ── read_file ─────────────────────────────────────────────────────────────────
@@ -23,7 +57,7 @@ def _resolve_path(file_path: str) -> Path:
 def tool_read_file(file_path: str, offset: int = 0, limit: int | None = None) -> str:
     path = _resolve_path(file_path)
     if not path.exists():
-        return f"Error: File not found: {path}"
+        return _read_error(path)
     try:
         with open(path) as f:
             lines = f.readlines()
@@ -61,7 +95,7 @@ def tool_edit_file(
     """Exact string replacement in a file. Fails if old_string is not unique."""
     path = _resolve_path(file_path)
     if not path.exists():
-        return f"Error: File not found: {path}"
+        return _read_error(path)
     try:
         content = path.read_text()
     except Exception as e:
