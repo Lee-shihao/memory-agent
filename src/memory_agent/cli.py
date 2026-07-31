@@ -14,10 +14,9 @@ from pathlib import Path
 from memory_agent.config import load_config, Config
 from memory_agent.debug import enable as _debug_enable
 from memory_agent.storage import MemoryStore
-from memory_agent.retriever import Retriever
 from memory_agent.agent_loop import run_agent_loop
 from memory_agent.extractor import extract_and_store
-from memory_agent.tools import set_workspace_root
+from memory_agent.tools import set_workspace_root, reset_session_state, pre_index_skills
 from memory_agent.commands import handle_slash_command
 
 
@@ -124,41 +123,17 @@ def run_pipeline(
 ) -> None:
     """Execute the full 3-step pipeline for a single conversation turn."""
 
-    # Step 1: Memory Retrieval + Skill Routing
-    memory_context = ""
-    skill_context = ""
+    # Step 1: Initialize session state + pre-index skills (no prompt injection)
     injected_memories: list[dict] = []
+    combined_context = ""
+
+    reset_session_state()
 
     if not skip_memory:
-        # Memory retrieval
-        print("Checking memory...", file=sys.stderr)
         try:
-            retriever = Retriever(config, store)
-            injected_memories, memory_context = retriever.retrieve(user_query)
-            if memory_context:
-                print(f"  Injected {len(injected_memories)} memory/memories.", file=sys.stderr)
+            pre_index_skills(config)
         except Exception as e:
-            print(f"  Memory retrieval failed: {e}", file=sys.stderr)
-
-        # Skill routing (embedding-based)
-        try:
-            from memory_agent.skills import SkillRouter, discover_skills, format_skills_for_injection
-
-            skills = discover_skills(config.memory_dir.parent)
-            if skills:
-                router = SkillRouter(
-                    chroma_dir=config.memory_dir / "chroma",
-                    embedding_api_base=config.embedding_api_base,
-                    embedding_api_key=config.embedding_api_key,
-                    embedding_model=config.embedding_model,
-                )
-                router.index_skills(skills)
-                matched = router.search(user_query, top_k=3)
-                if matched:
-                    skill_context = format_skills_for_injection(matched)
-                    print(f"  Matched {len(matched)} skill(s).", file=sys.stderr)
-        except Exception as e:
-            print(f"  Skill routing failed: {e}", file=sys.stderr)
+            print(f"  Skill indexing failed: {e}", file=sys.stderr)
 
     # Handle /memory slash commands
     if user_query.startswith("/memory"):
