@@ -95,8 +95,23 @@ Special patterns to detect:
 | Tier | Interactive mode | Single-shot mode | Timeout |
 |---|---|---|---|
 | Safe | Silent auto-allow | Silent auto-allow | N/A |
-| Dangerous | Prompt [y/n/s], no timeout | Prompt [y/n/s], no timeout | No timeout |
-| Unknown | Prompt [y/n], 30s timeout | Prompt [y/n], 30s timeout | Auto-allow |
+| Dangerous | Prompt [y] allow [n] deny or type feedback, no timeout | Same | No timeout |
+| Unknown | Prompt [y] allow [n] deny or type feedback, 30s timeout | Same | Auto-allow |
+
+#### User Input Handling
+
+The confirmation prompt accepts these forms:
+
+| Input | Behavior |
+|---|---|
+| `y` / `yes` | Allow execution |
+| `n` / `no` | Deny execution (agent receives "[Blocked by user]") |
+| `n feedback text` | Deny + feedback (agent receives "[Blocked by user] feedback text") |
+| `feedback text` (other) | Allow + feedback (agent receives result + "[User note: feedback]") |
+
+This lets the user reject a dangerous command while guiding the agent toward a safer alternative, e.g.:
+- `n use mv instead of rm` → agent sees the rejection and the suggestion
+- `n don't need sudo, try without` → agent sees the guidance
 
 #### Single-shot Mode Change
 
@@ -108,7 +123,10 @@ After change: single-shot mode also uses the confirm callback. Safe commands aut
 
 Current `_bash_confirm` in `cli.py` only handles `run_bash`. It is renamed to `_tool_confirm` and handles:
 
-1. `run_bash` → classify command, apply tier-appropriate confirmation
+1. `run_bash` → classify command, apply tier-appropriate confirmation. Supports:
+   - `y`/`yes` → allow; `n`/`no` → deny
+   - `n <feedback>` → deny with guidance (agent sees the feedback)
+   - `<free text>` → allow with feedback (agent sees "[User note: ...]")
 2. `ask_user` → present question, collect user response, return as tool result
 3. All other tools → allow (return `True, ""`)
 
