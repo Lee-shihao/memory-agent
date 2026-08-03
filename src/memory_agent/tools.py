@@ -41,6 +41,81 @@ def pre_index_skills(config: "Config") -> None:
 _workspace_root = Path.cwd()
 
 
+# ── bash command classification ────────────────────────────────────────────────
+
+SAFE_BASH_COMMANDS: set[str] = {
+    # Read / view
+    "ls", "cat", "file", "head", "tail", "less", "more",
+    # Search / count
+    "find", "grep", "wc", "stat", "du", "df", "sort", "uniq",
+    # Info
+    "pwd", "which", "type", "env", "printenv", "uname", "whoami",
+    "date", "id", "hostname", "tree",
+    # Text processing (read-only usage assumed)
+    "awk", "sed", "cut", "tr", "tee",
+    # No-side-effect ops
+    "echo", "true", "false", "diff", "cmp", "dirname", "basename",
+    "realpath", "readlink", "xargs",
+    # Lightweight create ops (non-destructive)
+    "mkdir", "touch",
+}
+
+DANGEROUS_BASH_COMMANDS: set[str] = {
+    # Delete / overwrite
+    "rm", "rmdir", "dd",
+    # Permissions / privilege
+    "chmod", "chown", "chgrp", "sudo", "su",
+    # Process signals
+    "kill", "killall", "pkill",
+    # System management
+    "shutdown", "reboot", "halt", "systemctl", "service",
+    "mount", "umount", "mkfs", "fdisk",
+    # Package managers
+    "apt", "apt-get", "yum", "dnf", "pacman",
+    "pip", "pip3", "npm", "yarn", "npx", "cargo", "go",
+    # Network download (often piped to shell)
+    "curl", "wget",
+    # Remote access / sync
+    "ssh", "scp", "rsync",
+    # Eval / exec
+    "eval", "exec", "source",
+}
+
+
+def classify_bash_command(command: str) -> str:
+    """Classify a bash command as 'safe', 'dangerous', or 'unknown'.
+
+    Checks the base command and special patterns:
+      - 'git push', 'git fetch', 'git pull' → dangerous
+      - 'curl ... | sh', 'wget ... | bash' → dangerous
+      - Other git subcommands → safe (git has its own tool)
+    """
+    stripped = command.strip()
+    if not stripped:
+        return "safe"  # empty command is harmless
+
+    # Check for dangerous pipe patterns: curl/wget piped to sh/bash
+    if re.search(r"(curl|wget)\s+.*\|\s*(sh|bash)", stripped):
+        return "dangerous"
+
+    # Extract base command
+    parts = stripped.split()
+    base = parts[0]
+
+    # Check multi-word prefixes (e.g. "git push")
+    if base == "git" and len(parts) > 1:
+        sub = parts[1]
+        if sub in ("push", "fetch", "pull"):
+            return "dangerous"
+        return "safe"  # git is handled by git_ops tool, allow here for scripting
+
+    if base in DANGEROUS_BASH_COMMANDS:
+        return "dangerous"
+    if base in SAFE_BASH_COMMANDS:
+        return "safe"
+    return "unknown"
+
+
 def set_workspace_root(path: Path) -> None:
     global _workspace_root
     _workspace_root = path.resolve()
