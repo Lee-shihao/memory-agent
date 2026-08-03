@@ -508,6 +508,28 @@ def tool_search_memory(query: str, top_k: int = 5) -> str:
     return "\n".join(lines)
 
 
+# ── ask_user ──────────────────────────────────────────────────────────────────
+
+def tool_ask_user(
+    question: str,
+    header: str,
+    options: list[dict] | None = None,
+    multi_select: bool = False,
+) -> str:
+    """Ask the user a question during the agent loop.
+
+    This executor is a pass-through — actual user interaction happens
+    in the confirm callback (cli.py), which intercepts ask_user calls
+    before this runs. If this executor is reached (no callback / non-interactive),
+    it returns a timeout/default response.
+    """
+    if options:
+        # Return first option as default when no interactive handler
+        selected = [options[0]["label"]] if not multi_select else [o["label"] for o in options[:1]]
+        return f"[auto-selected] {', '.join(selected)}"
+    return ""
+
+
 # ── tool registry ─────────────────────────────────────────────────────────────
 
 TOOL_DEFINITIONS = [
@@ -632,6 +654,57 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "ask_user",
+            "description": (
+                "Ask the user for input when you lack critical information "
+                "or need to choose between approaches. Use for clarifying "
+                "requirements, requesting feedback, or selecting from options. "
+                "Supports multiple choice (2-4 options, single or multi-select) "
+                "and open-ended questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The complete question to ask the user",
+                    },
+                    "header": {
+                        "type": "string",
+                        "description": "Short category label (max 12 chars), e.g. 'Approach', 'Library'",
+                    },
+                    "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "description": "Short label for this option (1-5 words)",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "What this option means or what will happen if chosen",
+                                },
+                            },
+                            "required": ["label", "description"],
+                        },
+                        "description": "2-4 predefined choices. Omit for open-ended questions.",
+                    },
+                    "multi_select": {
+                        "type": "boolean",
+                        "description": "Allow multiple selections (default false). Only valid when options is provided.",
+                    },
+                },
+                "required": ["question", "header"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_memory",
             "description": (
                 "Search past conversation memories for relevant context. "
@@ -686,6 +759,7 @@ TOOL_EXECUTORS = {
     "load_skill": tool_load_skill,
     "search_memory": tool_search_memory,
     "search_skills": tool_search_skills,
+    "ask_user": tool_ask_user,
 }
 
 
