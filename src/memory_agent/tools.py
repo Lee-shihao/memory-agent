@@ -41,6 +41,81 @@ def pre_index_skills(config: "Config") -> None:
 _workspace_root = Path.cwd()
 
 
+# ── bash command classification ────────────────────────────────────────────────
+
+SAFE_BASH_COMMANDS: set[str] = {
+    # Read / view
+    "ls", "cat", "file", "head", "tail", "less", "more",
+    # Search / count
+    "find", "grep", "wc", "stat", "du", "df", "sort", "uniq",
+    # Info
+    "pwd", "which", "type", "env", "printenv", "uname", "whoami",
+    "date", "id", "hostname", "tree",
+    # Text processing (read-only usage assumed)
+    "awk", "sed", "cut", "tr", "tee",
+    # No-side-effect ops
+    "echo", "true", "false", "diff", "cmp", "dirname", "basename",
+    "realpath", "readlink", "xargs",
+    # Lightweight create ops (non-destructive)
+    "mkdir", "touch",
+}
+
+DANGEROUS_BASH_COMMANDS: set[str] = {
+    # Delete / overwrite
+    "rm", "rmdir", "dd",
+    # Permissions / privilege
+    "chmod", "chown", "chgrp", "sudo", "su",
+    # Process signals
+    "kill", "killall", "pkill",
+    # System management
+    "shutdown", "reboot", "halt", "systemctl", "service",
+    "mount", "umount", "mkfs", "fdisk",
+    # Package managers
+    "apt", "apt-get", "yum", "dnf", "pacman",
+    "pip", "pip3", "npm", "yarn", "npx", "cargo", "go",
+    # Network download (often piped to shell)
+    "curl", "wget",
+    # Remote access / sync
+    "ssh", "scp", "rsync",
+    # Eval / exec
+    "eval", "exec", "source",
+}
+
+
+def classify_bash_command(command: str) -> str:
+    """Classify a bash command as 'safe', 'dangerous', or 'unknown'.
+
+    Checks the base command and special patterns:
+      - 'git push', 'git fetch', 'git pull' → dangerous
+      - 'curl ... | sh', 'wget ... | bash' → dangerous
+      - Other git subcommands → safe (git has its own tool)
+    """
+    stripped = command.strip()
+    if not stripped:
+        return "safe"  # empty command is harmless
+
+    # Check for dangerous pipe patterns: curl/wget piped to sh/bash
+    if re.search(r"(curl|wget)\s+.*\|\s*(sh|bash)", stripped):
+        return "dangerous"
+
+    # Extract base command
+    parts = stripped.split()
+    base = parts[0]
+
+    # Check multi-word prefixes (e.g. "git push")
+    if base == "git" and len(parts) > 1:
+        sub = parts[1]
+        if sub in ("push", "fetch", "pull"):
+            return "dangerous"
+        return "safe"  # git is handled by git_ops tool, allow here for scripting
+
+    if base in DANGEROUS_BASH_COMMANDS:
+        return "dangerous"
+    if base in SAFE_BASH_COMMANDS:
+        return "safe"
+    return "unknown"
+
+
 def set_workspace_root(path: Path) -> None:
     global _workspace_root
     _workspace_root = path.resolve()
@@ -433,6 +508,28 @@ def tool_search_memory(query: str, top_k: int = 5) -> str:
     return "\n".join(lines)
 
 
+# ── ask_user ──────────────────────────────────────────────────────────────────
+
+def tool_ask_user(
+    question: str,
+    header: str,
+    options: list[dict] | None = None,
+    multi_select: bool = False,
+) -> str:
+    """Ask the user a question during the agent loop.
+
+    This executor is a pass-through — actual user interaction happens
+    in the confirm callback (cli.py), which intercepts ask_user calls
+    before this runs. If this executor is reached (no callback / non-interactive),
+    it returns a timeout/default response.
+    """
+    if options:
+        # Return first option as default when no interactive handler
+        selected = [options[0]["label"]] if not multi_select else [o["label"] for o in options[:1]]
+        return f"[auto-selected] {', '.join(selected)}"
+    return ""
+
+
 # ── tool registry ─────────────────────────────────────────────────────────────
 
 TOOL_DEFINITIONS = [
@@ -557,6 +654,57 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "ask_user",
+            "description": (
+                "Ask the user for input when you lack critical information "
+                "or need to choose between approaches. Use for clarifying "
+                "requirements, requesting feedback, or selecting from options. "
+                "Supports multiple choice (2-4 options, single or multi-select) "
+                "and open-ended questions."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The complete question to ask the user",
+                    },
+                    "header": {
+                        "type": "string",
+                        "description": "Short category label (max 12 chars), e.g. 'Approach', 'Library'",
+                    },
+                    "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {
+                                    "type": "string",
+                                    "description": "Short label for this option (1-5 words)",
+                                },
+                                "description": {
+                                    "type": "string",
+                                    "description": "What this option means or what will happen if chosen",
+                                },
+                            },
+                            "required": ["label", "description"],
+                        },
+                        "description": "2-4 predefined choices. Omit for open-ended questions.",
+                    },
+                    "multi_select": {
+                        "type": "boolean",
+                        "description": "Allow multiple selections (default false). Only valid when options is provided.",
+                    },
+                },
+                "required": ["question", "header"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_memory",
             "description": (
                 "Search past conversation memories for relevant context. "
@@ -611,6 +759,7 @@ TOOL_EXECUTORS = {
     "load_skill": tool_load_skill,
     "search_memory": tool_search_memory,
     "search_skills": tool_search_skills,
+    "ask_user": tool_ask_user,
 }
 
 

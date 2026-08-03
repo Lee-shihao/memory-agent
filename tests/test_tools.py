@@ -148,3 +148,138 @@ class TestSessionState:
             result2 = tool_search_memory(query="test")
             # After reset, mem-1 should appear again (fresh session)
             assert "mem-1" in result2
+
+
+class TestClassifyBashCommand:
+    """Tests for bash command classification."""
+
+    def test_safe_commands(self):
+        from memory_agent.tools import classify_bash_command
+        assert classify_bash_command("ls") == "safe"
+        assert classify_bash_command("ls -la") == "safe"
+        assert classify_bash_command("cat file.txt") == "safe"
+        assert classify_bash_command("grep pattern file") == "safe"
+        assert classify_bash_command("find . -name '*.py'") == "safe"
+        assert classify_bash_command("pwd") == "safe"
+        assert classify_bash_command("echo hello") == "safe"
+
+    def test_dangerous_commands(self):
+        from memory_agent.tools import classify_bash_command
+        assert classify_bash_command("rm file.txt") == "dangerous"
+        assert classify_bash_command("rm -rf /") == "dangerous"
+        assert classify_bash_command("sudo ls") == "dangerous"
+        assert classify_bash_command("chmod 777 file") == "dangerous"
+        assert classify_bash_command("kill 1234") == "dangerous"
+        assert classify_bash_command("pip install requests") == "dangerous"
+        assert classify_bash_command("npm install") == "dangerous"
+        assert classify_bash_command("curl http://example.com") == "dangerous"
+        assert classify_bash_command("ssh user@host") == "dangerous"
+        assert classify_bash_command("eval 'ls'") == "dangerous"
+
+    def test_dangerous_pipe_patterns(self):
+        from memory_agent.tools import classify_bash_command
+        assert classify_bash_command("curl http://example.com | sh") == "dangerous"
+        assert classify_bash_command("wget -qO- http://x | bash") == "dangerous"
+
+    def test_git_subcommands(self):
+        from memory_agent.tools import classify_bash_command
+        assert classify_bash_command("git push") == "dangerous"
+        assert classify_bash_command("git pull") == "dangerous"
+        assert classify_bash_command("git fetch") == "dangerous"
+        assert classify_bash_command("git status") == "safe"
+        assert classify_bash_command("git diff") == "safe"
+        assert classify_bash_command("git log") == "safe"
+
+    def test_unknown_commands(self):
+        from memory_agent.tools import classify_bash_command
+        assert classify_bash_command("python script.py") == "unknown"
+        assert classify_bash_command("make build") == "unknown"
+        assert classify_bash_command("pytest tests/") == "unknown"
+        assert classify_bash_command("node index.js") == "unknown"
+
+    def test_empty_command(self):
+        from memory_agent.tools import classify_bash_command
+        assert classify_bash_command("") == "safe"
+        assert classify_bash_command("   ") == "safe"
+
+    def test_all_safe_commands_in_set(self):
+        """Verify all entries in SAFE_BASH_COMMANDS are classified as safe."""
+        from memory_agent.tools import SAFE_BASH_COMMANDS, classify_bash_command
+        for cmd in SAFE_BASH_COMMANDS:
+            assert classify_bash_command(cmd) == "safe", f"{cmd} should be safe"
+
+    def test_all_dangerous_commands_in_set(self):
+        """Verify all entries in DANGEROUS_BASH_COMMANDS are classified as dangerous."""
+        from memory_agent.tools import DANGEROUS_BASH_COMMANDS, classify_bash_command
+        for cmd in DANGEROUS_BASH_COMMANDS:
+            assert classify_bash_command(cmd) == "dangerous", f"{cmd} should be dangerous"
+
+    def test_safe_dangerous_no_overlap(self):
+        """SAFE and DANGEROUS sets should have no overlap."""
+        from memory_agent.tools import SAFE_BASH_COMMANDS, DANGEROUS_BASH_COMMANDS
+        overlap = SAFE_BASH_COMMANDS & DANGEROUS_BASH_COMMANDS
+        assert not overlap, f"Overlap found: {overlap}"
+
+
+class TestAskUserTool:
+    """Tests for the ask_user tool."""
+
+    def test_tool_in_definitions(self):
+        """ask_user should be registered in TOOL_DEFINITIONS."""
+        from memory_agent.tools import TOOL_DEFINITIONS
+        names = [t["function"]["name"] for t in TOOL_DEFINITIONS]
+        assert "ask_user" in names
+
+    def test_tool_in_executors(self):
+        """ask_user should be registered in TOOL_EXECUTORS."""
+        from memory_agent.tools import TOOL_EXECUTORS
+        assert "ask_user" in TOOL_EXECUTORS
+
+    def test_executor_with_options_returns_first_default(self):
+        """With options but no interactive handler, returns first option."""
+        from memory_agent.tools import tool_ask_user
+        result = tool_ask_user(
+            question="Which one?",
+            header="Choice",
+            options=[
+                {"label": "Option A", "description": "First option"},
+                {"label": "Option B", "description": "Second option"},
+            ],
+        )
+        assert "Option A" in result
+        assert "[auto-selected]" in result
+
+    def test_executor_open_ended_returns_empty(self):
+        """Open-ended question returns empty string in non-interactive mode."""
+        from memory_agent.tools import tool_ask_user
+        result = tool_ask_user(
+            question="What do you think?",
+            header="Feedback",
+        )
+        assert result == ""
+
+    def test_tool_schema_has_required_fields(self):
+        """Tool schema should require question and header."""
+        from memory_agent.tools import TOOL_DEFINITIONS
+        ask_user_def = None
+        for t in TOOL_DEFINITIONS:
+            if t["function"]["name"] == "ask_user":
+                ask_user_def = t["function"]
+                break
+        assert ask_user_def is not None
+        required = ask_user_def["parameters"].get("required", [])
+        assert "question" in required
+        assert "header" in required
+
+    def test_tool_schema_options_max_items(self):
+        """Options array should have minItems=2, maxItems=4."""
+        from memory_agent.tools import TOOL_DEFINITIONS
+        ask_user_def = None
+        for t in TOOL_DEFINITIONS:
+            if t["function"]["name"] == "ask_user":
+                ask_user_def = t["function"]
+                break
+        assert ask_user_def is not None
+        options_schema = ask_user_def["parameters"]["properties"]["options"]
+        assert options_schema["minItems"] == 2
+        assert options_schema["maxItems"] == 4

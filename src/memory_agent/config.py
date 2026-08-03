@@ -27,7 +27,7 @@ retrieval:
   similarity_threshold: 0.5
 
 extractor:
-  auto_confirm: false
+  auto_confirm: true
   keep_full_transcript: true
 """
 
@@ -74,7 +74,7 @@ class Config:
     retrieval_top_k: int = 10
     retrieval_similarity_threshold: float = 0.5
 
-    extractor_auto_confirm: bool = False
+    extractor_auto_confirm: bool = True
     extractor_keep_full_transcript: bool = True
 
     memory_dir: Path = field(default_factory=Path)
@@ -98,7 +98,7 @@ class Config:
             embedding_model=embedding.get("model", ""),
             retrieval_top_k=retrieval.get("top_k", 10),
             retrieval_similarity_threshold=retrieval.get("similarity_threshold", 0.5),
-            extractor_auto_confirm=extractor.get("auto_confirm", False),
+            extractor_auto_confirm=extractor.get("auto_confirm", True),
             extractor_keep_full_transcript=extractor.get("keep_full_transcript", True),
             memory_dir=memory_dir,
         )

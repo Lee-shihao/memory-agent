@@ -13,10 +13,14 @@ from pathlib import Path
 
 from memory_agent.config import load_config, Config
 from memory_agent.debug import enable as _debug_enable
+from memory_agent.debug import is_enabled as _debug_is_enabled
+from memory_agent.debug import reset_session_stats as _reset_token_stats
+from memory_agent.debug import get_session_stats as _get_token_stats
 from memory_agent.storage import MemoryStore
 from memory_agent.agent_loop import run_agent_loop
 from memory_agent.extractor import extract_and_store
 from memory_agent.tools import set_workspace_root, reset_session_state, pre_index_skills
+from memory_agent import __version__
 from memory_agent.commands import handle_slash_command
 
 
@@ -57,39 +61,51 @@ def _completer(text: str, state: int) -> str | None:
     return None
 
 
-# ── bash confirmation ────────────────────────────────────────────────────────
+# ── tool confirmation ────────────────────────────────────────────────────────
 
-_CONFIRM_TIMEOUT = 30  # seconds
+_ASK_USER_TIMEOUT = 60      # seconds — timeout for ask_user
+_DANGEROUS_TIMEOUT = None   # no timeout for dangerous commands
+_UNKNOWN_TIMEOUT = 30       # seconds — timeout for unknown commands
 
 
-def _bash_confirm(tool_name: str, arguments: dict) -> tuple[bool, str]:
-    """Confirm before executing bash commands. Timeout → auto-allow.
+def _present_ask_user(arguments: dict) -> str:
+    """Present an ask_user question to the user and collect their response.
 
-    Uses select() on stdin for reliable timeout — avoids threading conflicts
-    with readline that would cause user input to be lost.
+    Returns the user's response as a string (to be used as tool result).
     """
+    question = arguments.get("question", "")
+    header = arguments.get("header", "Question")
+    options = arguments.get("options")
+    multi_select = arguments.get("multi_select", False)
 
-    if tool_name != "run_bash":
-        return True, ""
+    # Build display
+    print(f"\n  ❓ {header}", file=sys.stderr)
+    print(f"  {question}", file=sys.stderr)
 
-    command = arguments.get("command", "")
-    tool_timeout = arguments.get("timeout", 120)
-    display_cmd = command if len(command) <= 200 else command[:197] + "..."
+    if options:
+        for i, opt in enumerate(options, 1):
+            label = opt.get("label", "?")
+            desc = opt.get("description", "")
+            print(f"  [{i}] {label}: {desc}", file=sys.stderr)
+        if multi_select:
+            print(f"  Enter numbers (e.g. 1,3) or type custom", file=sys.stderr, end="")
+        else:
+            print(f"  Enter number or type custom", file=sys.stderr, end="")
+    else:
+        print(f"  Type your response", file=sys.stderr, end="")
 
-    print(f"\n  🔧 run_bash  (timeout: {tool_timeout}s)", file=sys.stderr)
-    print(f"  {display_cmd}", file=sys.stderr)
-    print(
-        f"  [y] allow  [n] deny  or type feedback  "
-        f"({_CONFIRM_TIMEOUT}s timeout → auto-allow) ",
-        file=sys.stderr, end="", flush=True,
-    )
+    print(f"  ({_ASK_USER_TIMEOUT}s timeout)", file=sys.stderr, flush=True)
 
-    # Wait for input with timeout — runs on main thread, no threading issues
-    ready, _, _ = select.select([sys.stdin], [], [], _CONFIRM_TIMEOUT)
+    # Wait for input
+    ready, _, _ = select.select([sys.stdin], [], [], _ASK_USER_TIMEOUT)
 
     if not ready:
-        print("  ⏰ (timeout, auto-allowed)", file=sys.stderr)
-        return True, ""
+        print("  ⏰ (timeout, using default)", file=sys.stderr)
+        if options:
+            if multi_select:
+                return f"[Selected] {options[0]['label']}"
+            return f"[Selected] {options[0]['label']}"
+        return ""
 
     try:
         user_input = sys.stdin.readline().strip()
@@ -99,18 +115,142 @@ def _bash_confirm(tool_name: str, arguments: dict) -> tuple[bool, str]:
     print(file=sys.stderr)
 
     if not user_input:
-        return True, ""
+        if options:
+            return f"[Selected] {options[0]['label']}"
+        return ""
 
-    lowered = user_input.lower()
-    if lowered in ("y", "yes"):
-        return True, ""
-    elif lowered in ("n", "no"):
-        return False, ""
-    else:
-        return True, user_input  # feedback
+    # Try to parse as option numbers
+    if options:
+        parts = user_input.replace(",", " ").split()
+        numbers = []
+        for p in parts:
+            try:
+                n = int(p)
+                if 1 <= n <= len(options):
+                    numbers.append(n)
+            except ValueError:
+                pass
+        if numbers:
+            selected_labels = [options[n - 1]["label"] for n in numbers]
+            if multi_select:
+                return f"[Selected] {', '.join(selected_labels)}"
+            return f"[Selected] {selected_labels[0]}"
+
+    # Free text response
+    return user_input
+
+
+def _tool_confirm(tool_name: str, arguments: dict) -> tuple[bool, str]:
+    """Confirm tool execution. Handles ask_user and run_bash specially.
+
+    Returns (allowed, feedback) where:
+      - allowed=True  → execute tool, append feedback (if any) to result
+      - allowed=False → skip tool, use feedback as tool result
+    """
+
+    # --- ask_user: handle entirely here, block execution ---
+    if tool_name == "ask_user":
+        result = _present_ask_user(arguments)
+        return False, result  # block execution, use result as tool response
+
+    # --- run_bash: classify and confirm ---
+    if tool_name == "run_bash":
+        from memory_agent.tools import classify_bash_command
+
+        command = arguments.get("command", "")
+        tier = classify_bash_command(command)
+
+        if tier == "safe":
+            # Silent auto-allow
+            return True, ""
+
+        # Display prompt for dangerous/unknown
+        tool_timeout = arguments.get("timeout", 120)
+        display_cmd = command if len(command) <= 200 else command[:197] + "..."
+
+        if tier == "dangerous":
+            print(f"\n  ⚠️  run_bash [DANGEROUS]", file=sys.stderr)
+        else:
+            print(f"\n  🔧 run_bash  (timeout: {tool_timeout}s)", file=sys.stderr)
+
+        print(f"  {display_cmd}", file=sys.stderr)
+
+        if tier == "dangerous":
+            print(
+                f"  [y] allow  [n] deny  or type feedback (e.g. 'n use mv instead')",
+                file=sys.stderr, end="", flush=True,
+            )
+            timeout = _DANGEROUS_TIMEOUT
+        else:
+            print(
+                f"  [y] allow  [n] deny  or type feedback  "
+                f"({_UNKNOWN_TIMEOUT}s timeout → auto-allow)",
+                file=sys.stderr, end="", flush=True,
+            )
+            timeout = _UNKNOWN_TIMEOUT
+
+        # Wait for input
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+
+        if not ready:
+            if tier == "dangerous":
+                print("  ⛔ (timeout — dangerous command skipped)", file=sys.stderr)
+                return False, "Blocked: dangerous command timed out without confirmation"
+            else:
+                print("  ⏰ (timeout, auto-allowed)", file=sys.stderr)
+                return True, ""
+
+        try:
+            user_input = sys.stdin.readline().strip()
+        except (EOFError, OSError):
+            user_input = ""
+
+        print(file=sys.stderr)
+
+        if not user_input:
+            return True, ""
+
+        lowered = user_input.lower()
+        if lowered in ("y", "yes"):
+            return True, ""
+        elif lowered.startswith("n") and (len(lowered) == 1 or lowered[1:].startswith("o") or lowered[1] == " "):
+            # "n", "no", or "n <feedback>"
+            if lowered in ("n", "no"):
+                return False, ""
+            # "n <feedback>" — deny with guidance
+            feedback = user_input[1:].strip()
+            return False, f"[Denied] {feedback}"
+        else:
+            return True, user_input  # free text → allow with feedback
+
+    # All other tools: allow
+    return True, ""
 
 
 # ── pipeline ─────────────────────────────────────────────────────────────────
+
+def _print_token_stats() -> None:
+    """Print accumulated per-conversation token usage to stderr."""
+    import sys
+    stats = _get_token_stats()
+    if stats["llm_call_count"] == 0:
+        return
+    cache_rate = ""
+    if stats["prompt_tokens"] > 0 and stats["cached_tokens"] > 0:
+        rate = stats["cached_tokens"] / stats["prompt_tokens"] * 100
+        cache_rate = f"\n  Cache hit rate:    {rate:.1f}%"
+    print(
+        f"\n{'='*50}",
+        f"📊 Token usage this conversation:",
+        f"  LLM calls:         {stats['llm_call_count']}",
+        f"  Prompt tokens:     {stats['prompt_tokens']:,}",
+        f"  Completion tokens: {stats['completion_tokens']:,}",
+        f"  Total tokens:      {stats['total_tokens']:,}",
+        f"  Cached tokens:     {stats['cached_tokens']:,}{cache_rate}",
+        f"{'='*50}\n",
+        sep="\n", file=sys.stderr,
+    )
+
 
 def run_pipeline(
     user_query: str,
@@ -119,9 +259,14 @@ def run_pipeline(
     *,
     skip_memory: bool = False,
     skip_extract: bool = False,
+    manual_extract: bool = False,
     interactive: bool = False,
 ) -> None:
     """Execute the full 3-step pipeline for a single conversation turn."""
+
+    # Reset per-conversation token counters (debug mode)
+    if _debug_is_enabled():
+        _reset_token_stats()
 
     # Step 1: Initialize session state + pre-index skills (no prompt injection)
     injected_memories: list[dict] = []
@@ -146,7 +291,7 @@ def run_pipeline(
     transcript = run_agent_loop(
         config=config,
         user_query=user_query,
-        confirm_callback=_bash_confirm if interactive else None,
+        confirm_callback=_tool_confirm,
     )
     print(transcript)
 
@@ -154,9 +299,16 @@ def run_pipeline(
     if not skip_extract:
         print(file=sys.stderr)
         try:
-            extract_and_store(transcript=transcript, config=config, store=store)
+            extract_and_store(
+                transcript=transcript, config=config, store=store,
+                auto_confirm=not manual_extract,
+            )
         except Exception as e:
             print(f"Memory extraction failed: {e}", file=sys.stderr)
+
+    # Print per-conversation token stats (debug mode)
+    if _debug_is_enabled():
+        _print_token_stats()
 
 
 # ── interactive mode ─────────────────────────────────────────────────────────
@@ -172,7 +324,13 @@ _BANNER = r"""
 """
 
 
-def _interactive_loop(config: Config, store: MemoryStore):
+def _interactive_loop(
+    config: Config, store: MemoryStore,
+    *,
+    skip_memory: bool = False,
+    skip_extract: bool = False,
+    manual_extract: bool = False,
+):
     """Run the interactive REPL."""
     _setup_readline()
     readline.set_completer(_completer)
@@ -212,6 +370,9 @@ def _interactive_loop(config: Config, store: MemoryStore):
 
         run_pipeline(
             user_input, config, store,
+            skip_memory=skip_memory,
+            skip_extract=skip_extract,
+            manual_extract=manual_extract,
             interactive=True,
         )
 
@@ -221,6 +382,10 @@ def _interactive_loop(config: Config, store: MemoryStore):
 def main():
     parser = argparse.ArgumentParser(
         description="Memory Agent — AI assistant with persistent memory"
+    )
+    parser.add_argument(
+        "-v", "--version", action="version",
+        version=f"memory-agent {__version__}",
     )
     parser.add_argument(
         "query", nargs="*",
@@ -237,6 +402,11 @@ def main():
     parser.add_argument(
         "--no-extract", action="store_true",
         help="Skip memory extraction after the conversation",
+    )
+    parser.add_argument(
+        "--manual-extract", action="store_true",
+        help="Prompt for save/edit/discard on each extracted memory "
+             "(default: auto-save without asking)",
     )
     parser.add_argument(
         "--debug", action="store_true",
@@ -307,11 +477,17 @@ def main():
             user_query, config, store,
             skip_memory=args.no_memory,
             skip_extract=args.no_extract,
+            manual_extract=args.manual_extract,
             interactive=False,
         )
     else:
         # Interactive REPL — bash confirmation enabled
-        _interactive_loop(config, store)
+        _interactive_loop(
+            config, store,
+            skip_memory=args.no_memory,
+            skip_extract=args.no_extract,
+            manual_extract=args.manual_extract,
+        )
 
 
 if __name__ == "__main__":

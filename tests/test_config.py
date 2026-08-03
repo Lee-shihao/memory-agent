@@ -21,7 +21,7 @@ class TestConfigFromDict:
         })
         assert cfg.retrieval_top_k == 10
         assert cfg.retrieval_similarity_threshold == 0.5
-        assert cfg.extractor_auto_confirm is False
+        assert cfg.extractor_auto_confirm is True
         assert cfg.extractor_keep_full_transcript is True
 
     def test_env_var_substitution(self, monkeypatch):
