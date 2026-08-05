@@ -75,33 +75,34 @@ pub const EXTRACTOR_USER_TEMPLATE: &str = "Conversation transcript:\n\n{transcri
 
 // -- Agent Loop prompts --
 
-pub const ROUND_1_SYSTEM_PROMPT: &str = r#"You are a helpful AI assistant with access to tools. You can read files,
-write files, execute shell commands, and ask the user questions to help
-accomplish tasks.
+pub fn build_system_prompt(workspace_root: &std::path::Path) -> String {
+    let ws = workspace_root.display();
+    let os = std::env::consts::OS;
+    let home = dirs::home_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~".to_string());
+
+    format!(
+        r#"You are a helpful AI assistant with access to tools.
+
+## Environment
+- Workspace: {ws}
+- OS: {os}
+- Shell: bash
+- Home: {home}
+- All file paths are relative to workspace root.
 
 ## Before You Start
 
-Before diving into the task, analyze what the user is asking:
+Before diving into the task:
+- Call **search_memory(query)** if referencing past work or prior decisions.
+- Call **search_skills(query)** if the task may benefit from specialized workflows.
+- Call **ask_user** when you lack critical info or need to choose between approaches.
 
-1. **Need past conversation context?**
-   If the user references previous work, past discussions, or prior decisions,
-   call search_memory(query) with specific search terms to find relevant memories.
-
-2. **Need specialized skills or workflows?**
-   Call search_skills(query) to find matching skills with their full instructions.
-
-3. **Need user input or clarification?**
-   Call ask_user(question, header, [options]) when you:
-   - Lack critical information to proceed
-   - Need to choose between multiple valid approaches
-   - Are unsure about the user's requirements or preferences
-   - Need feedback on a decision before continuing
-
-4. **Simple, self-contained tasks** (e.g., "write hello world", "what is 2+2")
-   can be executed directly — skip retrieval and questions.
-
-Work step by step. When done, provide a clear summary of what was accomplished.
-"#;
+Work step by step. When done, provide a clear summary.
+"#
+    )
+}
 
 pub const ROUND_2_PLUS_PROMPT: &str = r#"Continue working on the user's task. Use the context you've already retrieved
 from tool calls earlier in this conversation.

@@ -1,12 +1,18 @@
+/// Skill discovery, loading, installation, and LanceDB-based embedding routing.
+///
+/// Skills are cached in memory after initial scan. Subsequent lookups return
+/// from cache without disk I/O. File content is loaded lazily only when needed.
 use anyhow::Result;
 use serde_json::Value as JsonValue;
-/// Skill discovery, loading, installation, and LanceDB-based embedding routing.
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 
-// -- Extra search paths --
+// -- Global skill cache -------------------------------------------------------
 
+static SKILLS_CACHE: RwLock<Vec<Skill>> = RwLock::new(Vec::new());
+static CACHE_INITIALIZED: RwLock<bool> = RwLock::new(false);
 static EXTRA_SEARCH_PATHS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 pub fn add_search_path(path: &str) {
@@ -30,7 +36,7 @@ fn search_paths(project_root: Option<&Path>) -> Vec<PathBuf> {
     paths
 }
 
-// -- Skill struct --
+// -- Skill struct -------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub struct Skill {
@@ -41,21 +47,10 @@ pub struct Skill {
 }
 
 impl Skill {
+    /// Load SKILL.md content from disk. Called lazily only when full content is needed.
     pub fn load(&self) -> String {
         let skill_file = self.path.join("SKILL.md");
-        let md_file = if skill_file.exists() {
-            skill_file
-        } else {
-            fs::read_dir(&self.path)
-                .ok()
-                .and_then(|dir| {
-                    dir.filter_map(|e| e.ok())
-                        .find(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-                        .map(|e| e.path())
-                })
-                .unwrap_or(skill_file)
-        };
-        fs::read_to_string(&md_file).unwrap_or_else(|_| format!("# {}\n\n(empty skill)", self.name))
+        fs::read_to_string(&skill_file).unwrap_or_else(|_| format!("# {}\n\n(empty skill)", self.name))
     }
 
     pub fn index_text(&self) -> String {
@@ -63,7 +58,7 @@ impl Skill {
     }
 }
 
-// -- Description extraction --
+// -- Description extraction ---------------------------------------------------
 
 fn extract_description(content: &str) -> String {
     let mut in_frontmatter = false;
@@ -91,11 +86,12 @@ fn extract_description(content: &str) -> String {
     "No description".to_string()
 }
 
-// -- Discovery --
+// -- Disk scan (called only during init and install) --------------------------
 
-pub fn discover_skills(project_root: Option<&Path>) -> Vec<Skill> {
+fn scan_skills(project_root: Option<&Path>) -> Vec<Skill> {
     let mut skills = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    let cwd = std::env::current_dir().unwrap_or_default();
 
     for search_dir in search_paths(project_root) {
         if !search_dir.exists() {
@@ -125,30 +121,18 @@ pub fn discover_skills(project_root: Option<&Path>) -> Vec<Skill> {
 
             let skill_md = entry.join("SKILL.md");
             if !skill_md.exists() {
-                let has_md = fs::read_dir(entry).ok().is_some_and(|dir| {
-                    dir.filter_map(|e| e.ok())
-                        .any(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-                });
-                if !has_md {
-                    continue;
-                }
+                continue;
             }
 
             seen.insert(name.clone());
 
-            let source = if search_dir
-                .starts_with(project_root.unwrap_or(&std::env::current_dir().unwrap_or_default()))
-            {
+            let source = if search_dir.starts_with(project_root.unwrap_or(&cwd)) {
                 "project"
             } else {
                 "user"
             };
 
-            let desc = if skill_md.exists() {
-                extract_description(&fs::read_to_string(&skill_md).unwrap_or_default())
-            } else {
-                name.clone()
-            };
+            let desc = extract_description(&fs::read_to_string(&skill_md).unwrap_or_default());
 
             skills.push(Skill {
                 name,
@@ -161,17 +145,42 @@ pub fn discover_skills(project_root: Option<&Path>) -> Vec<Skill> {
     skills
 }
 
-pub fn get_skill(name: &str) -> Option<Skill> {
-    discover_skills(None).into_iter().find(|s| s.name == name)
+// -- Public API (cache-based) -------------------------------------------------
+
+/// Initialize the skill cache. Call once at startup.
+pub fn init_skills(project_root: &Path) {
+    let skills = scan_skills(Some(project_root));
+    *SKILLS_CACHE.write().unwrap() = skills;
+    *CACHE_INITIALIZED.write().unwrap() = true;
 }
 
+pub fn is_cache_initialized() -> bool {
+    *CACHE_INITIALIZED.read().unwrap()
+}
+
+/// Look up a skill by name from the in-memory cache.
+pub fn get_skill(name: &str) -> Option<Skill> {
+    SKILLS_CACHE
+        .read()
+        .unwrap()
+        .iter()
+        .find(|s| s.name == name)
+        .cloned()
+}
+
+/// Get all cached skills (no disk I/O).
+pub fn cached_skills() -> Vec<Skill> {
+    SKILLS_CACHE.read().unwrap().clone()
+}
+
+/// Load full skill content. Only reads the SKILL.md file from disk — no directory scan.
 pub fn load_skill_content(name: &str) -> String {
     if name.is_empty() {
-        return get_skill_list_text(None);
+        return get_skill_list_text();
     }
     match get_skill(name) {
         Some(skill) => {
-            let content = skill.load();
+            let content = skill.load(); // lazy file read
             format!(
                 "--- SKILL: {name} ({source}) ---\nDescription: {desc}\n{sep}\n{content}\n--- END SKILL: {name} ---",
                 name = skill.name,
@@ -181,7 +190,7 @@ pub fn load_skill_content(name: &str) -> String {
             )
         }
         None => {
-            let skills = discover_skills(None);
+            let skills = cached_skills();
             let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
             if names.is_empty() {
                 "No skills installed.".to_string()
@@ -192,8 +201,9 @@ pub fn load_skill_content(name: &str) -> String {
     }
 }
 
-pub fn get_skill_list_text(project_root: Option<&Path>) -> String {
-    let skills = discover_skills(project_root);
+/// List available skills from cache (no disk I/O).
+pub fn get_skill_list_text() -> String {
+    let skills = cached_skills();
     if skills.is_empty() {
         return "No skills installed.".to_string();
     }
@@ -204,7 +214,38 @@ pub fn get_skill_list_text(project_root: Option<&Path>) -> String {
     lines.join("\n")
 }
 
-// -- SkillRouter --
+/// List installed skills grouped by search path (uses disk scan for path grouping display).
+pub fn list_installed_skills(project_root: Option<&Path>) -> String {
+    let skills = if is_cache_initialized() {
+        cached_skills()
+    } else {
+        scan_skills(project_root)
+    };
+    if skills.is_empty() {
+        return "No skills installed.".to_string();
+    }
+    // Group by search path for display
+    let mut lines = vec!["Installed skills:".to_string()];
+    for search_dir in search_paths(project_root) {
+        if !search_dir.exists() {
+            continue;
+        }
+        let names: Vec<&str> = skills
+            .iter()
+            .filter(|s| s.path.parent().map_or(false, |p| p == search_dir))
+            .map(|s| s.name.as_str())
+            .collect();
+        if !names.is_empty() {
+            lines.push(format!("\n  [{}]", search_dir.display()));
+            for name in &names {
+                lines.push(format!("    {name}"));
+            }
+        }
+    }
+    lines.join("\n")
+}
+
+// -- SkillRouter (LanceDB-based embedding search) ----------------------------
 
 pub struct SkillRouter {
     pub embedding_api_base: String,
@@ -213,7 +254,6 @@ pub struct SkillRouter {
     pub chroma_dir: PathBuf,
     pub indexed: HashSet<String>,
     initialized: bool,
-    // We'll use MemoryStore's LanceDB instance for skills
 }
 
 impl SkillRouter {
@@ -237,7 +277,6 @@ impl SkillRouter {
         if self.initialized {
             return Ok(());
         }
-        // SkillRouter uses a separate LanceDB connection for skills table
         self.initialized = true;
         Ok(())
     }
@@ -268,7 +307,6 @@ impl SkillRouter {
             return Ok(());
         }
 
-        // Use MemoryStore's LanceDB connection to add skills
         let db_path = self
             .chroma_dir
             .parent()
@@ -319,7 +357,7 @@ impl SkillRouter {
     }
 }
 
-// -- Installation --
+// -- Installation -------------------------------------------------------------
 
 pub fn install_skill(source: &str, project_root: Option<&Path>) -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -328,7 +366,7 @@ pub fn install_skill(source: &str, project_root: Option<&Path>) -> String {
     fs::create_dir_all(&target_dir).ok();
 
     let source_path = Path::new(source);
-    if source_path.is_dir() {
+    let (installed_name, result_msg) = if source_path.is_dir() {
         let name = source_path
             .file_name()
             .unwrap_or_default()
@@ -337,24 +375,24 @@ pub fn install_skill(source: &str, project_root: Option<&Path>) -> String {
         if dest.exists() {
             let _ = fs::remove_dir_all(&dest);
         }
-        // Recursive copy
-        match copy_dir_recursive(source_path, &dest) {
+        let msg = match copy_dir_recursive(source_path, &dest) {
             Ok(_) => format!("Skill '{name}' installed from {}", source_path.display()),
-            Err(e) => format!("Error copying directory: {e}"),
-        }
+            Err(e) => return format!("Error copying directory: {e}"),
+        };
+        (name.to_string(), msg)
     } else {
         let name = source
             .trim_end_matches('/')
             .split('/')
             .next_back()
             .unwrap_or("unknown")
-            .trim_end_matches(".git");
-        let dest = target_dir.join(name);
+            .trim_end_matches(".git")
+            .to_string();
+        let dest = target_dir.join(&name);
         if dest.exists() {
             let _ = fs::remove_dir_all(&dest);
         }
-
-        match std::process::Command::new("git")
+        let msg = match std::process::Command::new("git")
             .args(["clone", "--depth", "1", source])
             .arg(&dest)
             .output()
@@ -363,16 +401,42 @@ pub fn install_skill(source: &str, project_root: Option<&Path>) -> String {
                 format!("Skill '{name}' installed from {source}")
             }
             Ok(output) => {
-                format!(
+                return format!(
                     "Failed to clone: {}",
                     String::from_utf8_lossy(&output.stderr)
-                )
+                );
             }
             Err(e) => {
-                format!("Error: git not available for remote skill installation: {e}")
+                return format!("Error: git not available for remote skill installation: {e}");
             }
+        };
+        (name, msg)
+    };
+
+    // Update in-memory cache
+    if is_cache_initialized() {
+        let skill_dir = target_dir.join(&installed_name);
+        let skill_md = skill_dir.join("SKILL.md");
+        if skill_md.exists() {
+            let desc = extract_description(&fs::read_to_string(&skill_md).unwrap_or_default());
+            let source_label = if skill_dir.starts_with(proj) {
+                "project"
+            } else {
+                "user"
+            };
+            let new_skill = Skill {
+                name: installed_name,
+                path: skill_dir,
+                description: desc,
+                source: source_label.to_string(),
+            };
+            let mut cache = SKILLS_CACHE.write().unwrap();
+            cache.retain(|s| s.name != new_skill.name);
+            cache.push(new_skill);
         }
     }
+
+    result_msg
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
@@ -388,37 +452,4 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
         }
     }
     Ok(())
-}
-
-pub fn list_installed_skills(project_root: Option<&Path>) -> String {
-    let mut lines = vec!["Installed skills:".to_string()];
-    for search_dir in search_paths(project_root) {
-        if !search_dir.exists() {
-            continue;
-        }
-        lines.push(format!("\n  [{}]", search_dir.display()));
-        if let Ok(entries) = fs::read_dir(&search_dir) {
-            let mut dirs: Vec<_> = entries.filter_map(|e| e.ok()).collect();
-            dirs.sort_by_key(|e| e.file_name());
-            for entry in dirs {
-                let p = entry.path();
-                if p.is_dir() {
-                    let file_name = entry.file_name();
-                    let name = file_name.to_string_lossy();
-                    if name.starts_with('.') {
-                        continue;
-                    }
-                    let has_skill = p.join("SKILL.md").exists()
-                        || fs::read_dir(&p).ok().is_some_and(|dir| {
-                            dir.filter_map(|e| e.ok())
-                                .any(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-                        });
-                    if has_skill {
-                        lines.push(format!("    {name}"));
-                    }
-                }
-            }
-        }
-    }
-    lines.join("\n")
 }

@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::debug;
-use crate::prompts::{ROUND_1_SYSTEM_PROMPT, ROUND_2_PLUS_PROMPT};
-use crate::tools::{execute_tool, TOOL_DEFINITIONS};
+use crate::prompts::{build_system_prompt, ROUND_2_PLUS_PROMPT};
+use crate::tools::{execute_tool, workspace_root, TOOL_DEFINITIONS};
 use anyhow::Result;
 use serde_json::Value as JsonValue;
 /// Agent loop: OpenAI-compatible API with tool calling iteration.
@@ -21,8 +21,10 @@ pub async fn run_agent_loop(
     let tools = tools.unwrap_or(&TOOL_DEFINITIONS);
     let client = reqwest::Client::new();
 
+    let base_prompt = build_system_prompt(&workspace_root());
+
     let mut messages: Vec<JsonValue> = vec![
-        serde_json::json!({"role": "system", "content": ROUND_1_SYSTEM_PROMPT}),
+        serde_json::json!({"role": "system", "content": &base_prompt}),
         serde_json::json!({"role": "user", "content": user_query}),
     ];
 
@@ -32,7 +34,7 @@ pub async fn run_agent_loop(
         // Dynamic prompt switching after first iteration
         if iteration >= 1 {
             messages[0]["content"] =
-                serde_json::json!(format!("{ROUND_1_SYSTEM_PROMPT}\n\n{ROUND_2_PLUS_PROMPT}"));
+                serde_json::json!(format!("{base_prompt}\n\n{ROUND_2_PLUS_PROMPT}"));
         }
 
         let url = format!("{}/chat/completions", config.llm_api_base);

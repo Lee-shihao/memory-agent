@@ -1,8 +1,14 @@
 use anyhow::Result;
 use clap::Parser;
 use memory_agent::*;
-use std::collections::HashMap;
+use rustyline::completion::Completer;
+use rustyline::highlight::{Highlighter, MatchingBracketHighlighter};
+use rustyline::hint::{Hinter, HistoryHinter};
+use rustyline::validate::{MatchingBracketValidator, ValidationContext, ValidationResult, Validator};
+use rustyline::{Context, Helper};
+use std::borrow::Cow;
 /// Memory Agent CLI — 3-step pipeline: Retrieve → Agent Loop → Extract.
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -177,72 +183,51 @@ fn tool_confirm(tool_name: &str, args: &HashMap<String, serde_json::Value>) -> (
         let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
         let tier = tools::classify_bash_command(command);
 
+        // Silent auto-allow for safe commands
         if tier == tools::BashTier::Safe {
             return (true, String::new());
         }
 
-        let timeout_val = args.get("timeout").and_then(|v| v.as_u64()).unwrap_or(120);
         let display_cmd = if command.len() > 200 {
             format!("{}...", &command[..197])
         } else {
             command.to_string()
         };
 
-        return match tier {
-            tools::BashTier::Dangerous => {
-                eprintln!("\n  ⚠️  run_bash [DANGEROUS]");
-                eprintln!("  {display_cmd}");
-                eprint!("  [y] allow  [n] deny  or type feedback (e.g. 'n use mv instead'): ");
-                let _ = io::stderr().flush();
+        // Shell escape detection — always require confirmation
+        let escape_reason = tools::is_shell_escape(command);
 
-                let mut input = String::new();
-                if io::stdin().read_line(&mut input).is_err() {
-                    eprintln!("\n  ⛔ (timeout — dangerous command skipped)");
-                    return (
-                        false,
-                        "Blocked: dangerous command timed out without confirmation".to_string(),
-                    );
-                }
-                let input = input.trim().to_lowercase();
+        // Dangerous / escape / unknown — require confirmation
+        let label = if let Some(reason) = escape_reason {
+            format!("  ⚠️  run_bash [ESCAPE: {reason}]")
+        } else if tier == tools::BashTier::Dangerous {
+            format!("  ⚠️  run_bash [DANGEROUS]")
+        } else {
+            format!("  🔧 run_bash")
+        };
 
-                eprintln!();
+        eprintln!("\n{label}");
+        eprintln!("  {display_cmd}");
+        eprint!("  [y] allow  [n] deny: ");
+        let _ = io::stderr().flush();
 
-                if input.is_empty() || input == "y" || input == "yes" {
-                    (true, String::new())
-                } else if input == "n" || input == "no" {
-                    (false, String::new())
-                } else if let Some(stripped) = input.strip_prefix("n ") {
-                    (false, format!("[Denied] {}", stripped))
-                } else {
-                    (true, input)
-                }
-            }
-            tools::BashTier::Unknown => {
-                eprintln!("\n  🔧 run_bash  (timeout: {timeout_val}s)");
-                eprintln!("  {display_cmd}");
-                eprint!("  [y] allow  [n] deny  or type feedback  (30s timeout → auto-allow): ");
-                let _ = io::stderr().flush();
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).is_err() {
+            eprintln!("\n  ⛔ (denied)");
+            return (false, "Blocked: no confirmation".to_string());
+        }
+        let input = input.trim().to_lowercase();
 
-                let mut input = String::new();
-                if io::stdin().read_line(&mut input).is_err() {
-                    eprintln!("  ⏰ (timeout, auto-allowed)");
-                    return (true, String::new());
-                }
-                let input = input.trim().to_lowercase();
+        eprintln!();
 
-                eprintln!();
-
-                if input.is_empty() || input == "y" || input == "yes" {
-                    (true, String::new())
-                } else if input == "n" || input == "no" {
-                    (false, String::new())
-                } else if let Some(stripped) = input.strip_prefix("n ") {
-                    (false, format!("[Denied] {}", stripped))
-                } else {
-                    (true, input)
-                }
-            }
-            _ => (true, String::new()),
+        return if input == "y" || input == "yes" {
+            (true, String::new())
+        } else {
+            (false, format!("Blocked: {}", if input.is_empty() || input == "n" || input == "no" {
+                "denied by user".to_string()
+            } else {
+                input
+            }))
         };
     }
 
@@ -303,6 +288,125 @@ async fn run_pipeline(
     Ok(())
 }
 
+/// Custom rustyline Helper that provides tab-completion for slash commands.
+struct ReplHelper {
+    completer: ReplCompleter,
+    highlighter: MatchingBracketHighlighter,
+    validator: MatchingBracketValidator,
+    hinter: HistoryHinter,
+}
+
+impl Completer for ReplHelper {
+    type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        self.completer.complete(line, pos, ctx)
+    }
+}
+
+impl Hinter for ReplHelper {
+    type Hint = String;
+
+    fn hint(&self, line: &str, pos: usize, ctx: &Context<'_>) -> Option<String> {
+        self.hinter.hint(line, pos, ctx)
+    }
+}
+
+impl Highlighter for ReplHelper {
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        use std::borrow::Cow::Owned;
+        Owned(format!("\x1b[90m{hint}\x1b[0m"))
+    }
+
+    fn highlight<'l>(&self, line: &'l str, pos: usize) -> Cow<'l, str> {
+        self.highlighter.highlight(line, pos)
+    }
+
+    fn highlight_char(&self, line: &str, pos: usize, forced: bool) -> bool {
+        self.highlighter.highlight_char(line, pos, forced)
+    }
+}
+
+impl Validator for ReplHelper {
+    fn validate(
+        &self,
+        ctx: &mut ValidationContext,
+    ) -> rustyline::Result<ValidationResult> {
+        self.validator.validate(ctx)
+    }
+
+    fn validate_while_typing(&self) -> bool {
+        self.validator.validate_while_typing()
+    }
+}
+
+impl Helper for ReplHelper {}
+
+/// Top-level slash commands and their subcommands.
+struct ReplCompleter;
+
+impl Completer for ReplCompleter {
+    type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        // Only complete when line starts with "/"
+        if !line.starts_with('/') {
+            return Ok((pos, vec![]));
+        }
+
+        let top_level: &[&str] = &[
+            "/memory", "/exit", "/quit", "/q", "/help",
+        ];
+        let memory_subs: &[&str] = &[
+            "recent", "search", "show", "delete", "status",
+        ];
+
+        // How many complete words (space-separated segments)?
+        let segments: Vec<&str> = line[..pos].split(' ').collect();
+
+        match segments.len() {
+            1 => {
+                // Completing top-level command: find matches
+                let partial = segments[0];
+                let candidates: Vec<String> = top_level
+                    .iter()
+                    .filter(|cmd| cmd.starts_with(partial))
+                    .map(|s| s.to_string())
+                    .collect();
+                // Replace from the "/" character
+                let start = line[..pos].rfind('/').unwrap_or(pos);
+                Ok((start, candidates))
+            }
+            _ => {
+                // Completing subcommand — only for "/memory"
+                if segments[0] == "/memory" {
+                    let partial = segments.get(1).copied().unwrap_or("");
+                    let candidates: Vec<String> = memory_subs
+                        .iter()
+                        .filter(|sub| sub.starts_with(partial))
+                        .map(|s| s.to_string())
+                        .collect();
+                    // Start position: right after "/memory "
+                    let cmd_end = line[..pos].find(' ').map(|i| i + 1).unwrap_or(pos);
+                    Ok((cmd_end, candidates))
+                } else {
+                    Ok((pos, vec![]))
+                }
+            }
+        }
+    }
+}
+
 /// Interactive REPL mode.
 fn interactive_loop(
     config: &config::Config,
@@ -313,7 +417,14 @@ fn interactive_loop(
 ) -> Result<()> {
     eprintln!("{BANNER}");
 
-    let mut rl = rustyline::DefaultEditor::new()?;
+    let helper = ReplHelper {
+        completer: ReplCompleter,
+        highlighter: MatchingBracketHighlighter::new(),
+        validator: MatchingBracketValidator::new(),
+        hinter: HistoryHinter::new(),
+    };
+    let mut rl = rustyline::Editor::<ReplHelper, _>::new()?;
+    rl.set_helper(Some(helper));
     let history_file = dirs::home_dir()
         .unwrap_or_default()
         .join(".memory_agent_history");
@@ -380,8 +491,7 @@ fn interactive_loop(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Skill management commands (exit after processing)
@@ -423,6 +533,9 @@ async fn main() -> Result<()> {
     tools::set_workspace_root(&project_root);
     let config = config::load_config(&project_root)?;
 
+    // Initialize skill cache (scan once, serve from memory thereafter)
+    skills::init_skills(&project_root);
+
     // Debug logging
     if cli.debug {
         debug::enable(&config.memory_dir);
@@ -432,32 +545,36 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Create runtime for async initialization and single-shot mode.
+    // For interactive mode, interactive_loop creates its own runtime internally,
+    // so we drop this one first to avoid nested runtime errors.
+    let rt = tokio::runtime::Runtime::new()?;
+
     // Initialize storage
     let db_path = config.memory_dir.join("memories.db");
     let mut store = storage::MemoryStore::new(&db_path)?;
     store.init_schema()?;
-    store
-        .init_lancedb(
-            &config.memory_dir,
-            &config.embedding_api_base,
-            &config.embedding_api_key,
-            &config.embedding_model,
-        )
-        .await?;
+    rt.block_on(store.init_lancedb(
+        &config.memory_dir,
+        &config.embedding_api_base,
+        &config.embedding_api_key,
+        &config.embedding_model,
+    ))?;
 
     if let Some(query) = user_query {
         // Single-shot mode
-        run_pipeline(
+        rt.block_on(run_pipeline(
             &query,
             &config,
             &mut store,
             cli.no_memory,
             cli.no_extract,
             cli.manual_extract,
-        )
-        .await?;
+        ))?;
     } else {
-        // Interactive REPL
+        // Interactive REPL — drop the runtime first so interactive_loop
+        // can create its own without nesting.
+        drop(rt);
         interactive_loop(
             &config,
             &mut store,
