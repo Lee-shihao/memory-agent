@@ -29,14 +29,11 @@ thiserror = "1"
 once_cell = "1"
 dirs = "5"
 walkdir = "2"
-futures = "0.3"
 
-# LanceDB for vector storage (embedded)
-lancedb = "0.17"
-arrow-array = "53"
-arrow-schema = "53"
-arrow-data = "53"
-arrow = "53"
+# Vector search: lightweight HNSW (replaces lancedb)
+instant-distance = { version = "0.6", features = ["with-serde"] }
+bincode = "1"
+parking_lot = "0.12"
 
 [dev-dependencies]
 wiremock = "0.6"

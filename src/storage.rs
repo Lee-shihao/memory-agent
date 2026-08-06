@@ -1,15 +1,12 @@
 use crate::prompts::{Entity, Memory};
 use anyhow::{Context, Result};
-use arrow::array::{Float32Array, RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
-use arrow::record_batch::RecordBatchIterator;
-use futures::StreamExt;
-use lancedb::connect;
-use lancedb::query::{ExecutableQuery, QueryBase};
+use instant_distance::{Builder, HnswMap, Point as HnswPoint, Search};
+use parking_lot::RwLock;
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::fs;
-/// Storage layer: SQLite for metadata, LanceDB for vectors.
+/// Storage layer: SQLite for metadata, HNSW for vectors.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -60,19 +57,62 @@ CREATE INDEX IF NOT EXISTS idx_memories_conversation_at ON memories(conversation
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(type);
 CREATE INDEX IF NOT EXISTS idx_memory_tags_tag_id ON memory_tags(tag_id);
 "#;
+/// A vector point wrapping a 1024-d embedding.
+/// Distance metric: cosine distance (1 - cosine_similarity on unit-normalized vectors).
+#[derive(Clone, Serialize, Deserialize)]
+pub struct EmbeddingPoint {
+    pub data: Vec<f32>,
+}
 
-// Default embedding dimension for BAAI/bge-m3
-const EMBEDDING_DIM: i32 = 1024;
+impl EmbeddingPoint {
+    pub fn new(data: Vec<f32>) -> Self {
+        Self { data }
+    }
+}
+
+impl HnswPoint for EmbeddingPoint {
+    fn distance(&self, other: &Self) -> f32 {
+        let dot: f32 = self
+            .data
+            .iter()
+            .zip(&other.data)
+            .map(|(a, b)| a * b)
+            .sum();
+        1.0 - dot.max(-1.0).min(1.0)
+    }
+}
+
+/// Metadata stored alongside a memory vector.
+#[derive(Clone, Serialize, Deserialize)]
+struct MemoryMeta {
+    doc_id: String,
+    text: String,
+    metadata_json: String,
+}
+
+/// Metadata stored alongside a skill vector.
+#[derive(Clone, Serialize, Deserialize)]
+struct SkillMeta {
+    name: String,
+    description: String,
+    source: String,
+}
+
+type MemoryIndex = HnswMap<EmbeddingPoint, MemoryMeta>;
+type SkillIndex = HnswMap<EmbeddingPoint, SkillMeta>;
 
 pub struct MemoryStore {
     conn: Connection,
     db_path: PathBuf,
-    // LanceDB state
-    lancedb_conn: Option<Arc<lancedb::Connection>>,
+    // HNSW vector indices (Arc<RwLock<>> for concurrent reads, exclusive writes)
+    memories_idx: Arc<RwLock<Option<MemoryIndex>>>,
+    skills_idx: Arc<RwLock<Option<SkillIndex>>>,
+    persist_dir: PathBuf,
+    // Embedding config
     embedding_api_base: String,
     embedding_api_key: String,
     embedding_model: String,
-    lancedb_initialized: bool,
+    vector_store_initialized: bool,
 }
 
 impl MemoryStore {
@@ -82,11 +122,13 @@ impl MemoryStore {
         Ok(MemoryStore {
             conn,
             db_path: db_path.to_path_buf(),
-            lancedb_conn: None,
+            memories_idx: Arc::new(RwLock::new(None)),
+            skills_idx: Arc::new(RwLock::new(None)),
+            persist_dir: PathBuf::new(),
             embedding_api_base: String::new(),
             embedding_api_key: String::new(),
             embedding_model: String::new(),
-            lancedb_initialized: false,
+            vector_store_initialized: false,
         })
     }
 
@@ -95,7 +137,8 @@ impl MemoryStore {
         Ok(())
     }
 
-    pub async fn init_lancedb(
+    /// Initialize vector store: load existing indices from disk, or create empty ones.
+    pub async fn init_vector_store(
         &mut self,
         persist_dir: &Path,
         embedding_api_base: &str,
@@ -106,59 +149,63 @@ impl MemoryStore {
         self.embedding_api_base = embedding_api_base.to_string();
         self.embedding_api_key = embedding_api_key.to_string();
         self.embedding_model = embedding_model.to_string();
+        self.persist_dir = persist_dir.to_path_buf();
 
-        let db = connect(persist_dir.to_str().unwrap()).execute().await?;
-        let db = Arc::new(db);
+        let mem_path = persist_dir.join("memories.hnsw");
+        let skill_path = persist_dir.join("skills.hnsw");
 
-        // Ensure memories table exists
-        let existing_tables = db.table_names().execute().await?;
-        if !existing_tables.iter().any(|t| t == "memories") {
-            let schema = Arc::new(ArrowSchema::new(vec![
-                Field::new("id", DataType::Utf8, false),
-                Field::new(
-                    "vector",
-                    DataType::FixedSizeList(
-                        Arc::new(Field::new("item", DataType::Float32, true)),
-                        EMBEDDING_DIM,
-                    ),
-                    true,
-                ),
-                Field::new("text", DataType::Utf8, true),
-                Field::new("metadata_json", DataType::Utf8, true),
-            ]));
-            db.create_empty_table("memories", schema).execute().await?;
-        }
+        // Load or create memory index
+        let mem_idx = if mem_path.exists() {
+            let data = fs::read(&mem_path)?;
+            bincode::deserialize(&data).context("Failed to deserialize memories index")?
+        } else {
+            Builder::default()
+                .ef_search(200)
+                .ef_construction(200)
+                .build(Vec::new(), Vec::new())
+        };
+        *self.memories_idx.write() = Some(mem_idx);
 
-        // Ensure skills table exists
-        if !existing_tables.iter().any(|t| t == "skills") {
-            let schema = Arc::new(ArrowSchema::new(vec![
-                Field::new("name", DataType::Utf8, false),
-                Field::new(
-                    "vector",
-                    DataType::FixedSizeList(
-                        Arc::new(Field::new("item", DataType::Float32, true)),
-                        EMBEDDING_DIM,
-                    ),
-                    true,
-                ),
-                Field::new("description", DataType::Utf8, true),
-                Field::new("source", DataType::Utf8, true),
-            ]));
-            db.create_empty_table("skills", schema).execute().await?;
-        }
+        // Load or create skill index
+        let skill_idx = if skill_path.exists() {
+            let data = fs::read(&skill_path)?;
+            bincode::deserialize(&data).context("Failed to deserialize skills index")?
+        } else {
+            Builder::default()
+                .ef_search(100)
+                .ef_construction(100)
+                .build(Vec::new(), Vec::new())
+        };
+        *self.skills_idx.write() = Some(skill_idx);
 
-        self.lancedb_conn = Some(db);
-        self.lancedb_initialized = true;
+        self.vector_store_initialized = true;
         Ok(())
     }
 
+    pub fn is_vector_store_initialized(&self) -> bool {
+        self.vector_store_initialized
+    }
+
+    /// Compatibility alias for callers that still reference the old name.
+    pub async fn init_lancedb(
+        &mut self,
+        persist_dir: &Path,
+        embedding_api_base: &str,
+        embedding_api_key: &str,
+        embedding_model: &str,
+    ) -> Result<()> {
+        self.init_vector_store(persist_dir, embedding_api_base, embedding_api_key, embedding_model)
+            .await
+    }
+
+    /// Compatibility alias.
     pub fn is_lancedb_initialized(&self) -> bool {
-        self.lancedb_initialized
+        self.is_vector_store_initialized()
     }
 
     async fn get_embedding(&self, text: &str) -> Result<Vec<f32>> {
-        if !self.lancedb_initialized {
-            anyhow::bail!("LanceDB not initialized — embedding API not configured");
+        if !self.vector_store_initialized {
+            anyhow::bail!("Vector store not initialized — embedding API not configured");
         }
         let client = reqwest::Client::new();
         let url = format!("{}/embeddings", self.embedding_api_base);
@@ -185,122 +232,139 @@ impl MemoryStore {
         Ok(embedding)
     }
 
+    /// Persist the memory index to disk.
+    fn save_memories(&self) -> Result<()> {
+        let idx = self.memories_idx.read();
+        if let Some(ref idx) = *idx {
+            let data = bincode::serialize(idx).context("Failed to serialize memories index")?;
+            fs::write(self.persist_dir.join("memories.hnsw"), data)?;
+        }
+        Ok(())
+    }
+
+    /// Persist the skill index to disk.
+    fn save_skills(&self) -> Result<()> {
+        let idx = self.skills_idx.read();
+        if let Some(ref idx) = *idx {
+            let data = bincode::serialize(idx).context("Failed to serialize skills index")?;
+            fs::write(self.persist_dir.join("skills.hnsw"), data)?;
+        }
+        Ok(())
+    }
+
+    /// Rebuild the memory index from current data, adding a new entry.
+    fn rebuild_memories_with(
+        &self,
+        new_point: EmbeddingPoint,
+        new_meta: MemoryMeta,
+    ) -> Result<()> {
+        let mut idx = self.memories_idx.write();
+        let current = idx.take().unwrap();
+        let mut points: Vec<EmbeddingPoint> = current
+            .iter()
+            .map(|(_, p)| p.clone())
+            .collect();
+        let mut metas: Vec<MemoryMeta> = current.values.clone();
+        points.push(new_point);
+        metas.push(new_meta);
+        *idx = Some(Builder::default().ef_search(200).ef_construction(200).build(points, metas));
+        Ok(())
+    }
+
+    /// Rebuild the memory index without a specific entry.
+    fn rebuild_memories_without(&self, doc_id: &str) -> Result<()> {
+        let mut idx = self.memories_idx.write();
+        let current = idx.take().unwrap();
+        let mut points: Vec<EmbeddingPoint> = Vec::new();
+        let mut metas: Vec<MemoryMeta> = Vec::new();
+        for (i, (_, point)) in current.iter().enumerate() {
+            if current.values[i].doc_id != doc_id {
+                points.push(point.clone());
+                metas.push(current.values[i].clone());
+            }
+        }
+        *idx = Some(Builder::default().ef_search(200).ef_construction(200).build(points, metas));
+        Ok(())
+    }
+
+    /// Rebuild the skill index with an upserted entry.
+    fn rebuild_skills_with(
+        &self,
+        new_point: EmbeddingPoint,
+        new_meta: SkillMeta,
+    ) -> Result<()> {
+        let mut idx = self.skills_idx.write();
+        let current = idx.take().unwrap();
+        let mut points: Vec<EmbeddingPoint> = Vec::new();
+        let mut metas: Vec<SkillMeta> = Vec::new();
+        // Copy all entries except one with the same name (upsert)
+        for (i, (_, point)) in current.iter().enumerate() {
+            if current.values[i].name != new_meta.name {
+                points.push(point.clone());
+                metas.push(current.values[i].clone());
+            }
+        }
+        points.push(new_point);
+        metas.push(new_meta);
+        *idx = Some(Builder::default().ef_search(100).ef_construction(100).build(points, metas));
+        Ok(())
+    }
+
+    // -- Memory vector operations --
+
     pub async fn add_to_lancedb(
         &self,
         memory_id: &str,
         text: &str,
         metadata: &JsonValue,
     ) -> Result<String> {
-        let db = self
-            .lancedb_conn
-            .as_ref()
-            .context("LanceDB not initialized")?;
         let embedding = self.get_embedding(text).await?;
         let doc_id = format!("mem-{memory_id}");
-
-        let table = db.open_table("memories").execute().await?;
-
-        // Build a simple record batch with Arrow arrays
-        let id_array = StringArray::from(vec![doc_id.clone()]);
-        let text_array = StringArray::from(vec![text.to_string()]);
-        let metadata_array = StringArray::from(vec![metadata.to_string()]);
-
-        // Build FixedSizeList for vector
-        let flat: Vec<f32> = embedding.clone();
-        let vector_values = Float32Array::from(flat);
-        let vector_field = Arc::new(Field::new("item", DataType::Float32, true));
-
-        use arrow::array::FixedSizeListArray;
-        let vector_array =
-            FixedSizeListArray::new(vector_field, EMBEDDING_DIM, Arc::new(vector_values), None);
-
-        let schema = table.schema().await?;
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(id_array),
-                Arc::new(vector_array),
-                Arc::new(text_array),
-                Arc::new(metadata_array),
-            ],
-        )?;
-
-        let schema_ref = batch.schema();
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema_ref);
-        table.add(Box::new(reader)).execute().await?;
-
+        let meta = MemoryMeta {
+            doc_id: doc_id.clone(),
+            text: text.to_string(),
+            metadata_json: metadata.to_string(),
+        };
+        self.rebuild_memories_with(EmbeddingPoint::new(embedding), meta)?;
+        self.save_memories()?;
         Ok(doc_id)
     }
 
     pub async fn query_lancedb(&self, query_text: &str, top_k: usize) -> Result<Vec<JsonValue>> {
-        let db = self
-            .lancedb_conn
-            .as_ref()
-            .context("LanceDB not initialized")?;
         let embedding = self.get_embedding(query_text).await?;
-        let table = db.open_table("memories").execute().await?;
+        let query_point = EmbeddingPoint::new(embedding);
 
-        let results = table
-            .query()
-            .nearest_to(embedding.clone())?
-            .limit(top_k)
-            .execute()
-            .await?;
+        let idx = self.memories_idx.read();
+        let idx = idx.as_ref().context("Memory index not initialized")?;
 
-        // results is a RecordBatchStream — collect into batches
-        let mut memories = Vec::new();
-        let mut stream = results;
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            let schema = batch.schema();
-            let id_idx = schema.index_of("id").unwrap_or(0);
-            let text_idx = schema.index_of("text").unwrap_or(2);
-            let meta_idx = schema.index_of("metadata_json").unwrap_or(3);
-
-            for row in 0..batch.num_rows() {
-                let id = batch
-                    .column(id_idx)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .map(|a| a.value(row).to_string())
-                    .unwrap_or_default();
-                let text = batch
-                    .column(text_idx)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .map(|a| a.value(row).to_string())
-                    .unwrap_or_default();
-                let metadata_str = batch
-                    .column(meta_idx)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .map(|a| a.value(row).to_string())
-                    .unwrap_or_default();
-                let metadata: JsonValue = serde_json::from_str(&metadata_str).unwrap_or_default();
-                let memory_id = metadata
+        let mut search = Search::default();
+        let results: Vec<_> = idx
+            .search(&query_point, &mut search)
+            .take(top_k)
+            .map(|item| {
+                let meta = item.value;
+                let m: JsonValue =
+                    serde_json::from_str(&meta.metadata_json).unwrap_or_default();
+                let memory_id = m
                     .get("memory_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(&id)
+                    .unwrap_or(&meta.doc_id)
                     .to_string();
-
-                memories.push(serde_json::json!({
-                    "chroma_doc_id": id,
+                serde_json::json!({
+                    "chroma_doc_id": meta.doc_id,
                     "memory_id": memory_id,
-                    "text": text,
-                    "metadata": metadata,
-                }));
-            }
-        }
-        Ok(memories)
+                    "text": meta.text,
+                    "metadata": m,
+                })
+            })
+            .collect();
+
+        Ok(results)
     }
 
     pub async fn delete_from_lancedb(&self, doc_id: &str) -> Result<()> {
-        let db = self
-            .lancedb_conn
-            .as_ref()
-            .context("LanceDB not initialized")?;
-        let table = db.open_table("memories").execute().await?;
-        table.delete(format!("id = '{doc_id}'").as_str()).await?;
+        self.rebuild_memories_without(doc_id)?;
+        self.save_memories()?;
         Ok(())
     }
 
@@ -313,100 +377,42 @@ impl MemoryStore {
         description: &str,
         source: &str,
     ) -> Result<()> {
-        let db = self
-            .lancedb_conn
-            .as_ref()
-            .context("LanceDB not initialized")?;
         let embedding = self.get_embedding(text).await?;
-
-        // Delete existing entry for this skill if it exists
-        let table = db.open_table("skills").execute().await?;
-        table.delete(format!("name = '{name}'").as_str()).await?;
-
-        let name_array = StringArray::from(vec![name.to_string()]);
-        let desc_array = StringArray::from(vec![description.to_string()]);
-        let source_array = StringArray::from(vec![source.to_string()]);
-        let flat: Vec<f32> = embedding;
-        let vector_values = Float32Array::from(flat);
-        let vector_field = Arc::new(Field::new("item", DataType::Float32, true));
-        let vector_array = arrow::array::FixedSizeListArray::new(
-            vector_field,
-            EMBEDDING_DIM,
-            Arc::new(vector_values),
-            None,
-        );
-
-        let schema = table.schema().await?;
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(name_array),
-                Arc::new(vector_array),
-                Arc::new(desc_array),
-                Arc::new(source_array),
-            ],
-        )?;
-        let schema_ref = batch.schema();
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema_ref);
-        table.add(Box::new(reader)).execute().await?;
+        let meta = SkillMeta {
+            name: name.to_string(),
+            description: description.to_string(),
+            source: source.to_string(),
+        };
+        self.rebuild_skills_with(EmbeddingPoint::new(embedding), meta)?;
+        self.save_skills()?;
         Ok(())
     }
 
     pub async fn search_skills_lancedb(&self, query: &str, top_k: usize) -> Result<Vec<JsonValue>> {
-        let db = self
-            .lancedb_conn
-            .as_ref()
-            .context("LanceDB not initialized")?;
         let embedding = self.get_embedding(query).await?;
-        let table = db.open_table("skills").execute().await?;
+        let query_point = EmbeddingPoint::new(embedding);
 
-        let results = table
-            .query()
-            .nearest_to(embedding.clone())?
-            .limit(top_k)
-            .execute()
-            .await?;
+        let idx = self.skills_idx.read();
+        let idx = idx.as_ref().context("Skill index not initialized")?;
 
-        let mut skills = Vec::new();
-        let mut stream = results;
-        while let Some(batch_result) = stream.next().await {
-            let batch = batch_result?;
-            let schema = batch.schema();
-            let name_idx = schema.index_of("name").unwrap_or(0);
-            let desc_idx = schema.index_of("description").unwrap_or(2);
-            let source_idx = schema.index_of("source").unwrap_or(3);
+        let mut search = Search::default();
+        let results: Vec<_> = idx
+            .search(&query_point, &mut search)
+            .take(top_k)
+            .map(|item| {
+                let meta = item.value;
+                serde_json::json!({
+                    "name": meta.name,
+                    "description": meta.description,
+                    "source": meta.source,
+                })
+            })
+            .collect();
 
-            for row in 0..batch.num_rows() {
-                let name = batch
-                    .column(name_idx)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .map(|a| a.value(row).to_string())
-                    .unwrap_or_default();
-                let description = batch
-                    .column(desc_idx)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .map(|a| a.value(row).to_string())
-                    .unwrap_or_default();
-                let source = batch
-                    .column(source_idx)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .map(|a| a.value(row).to_string())
-                    .unwrap_or_default();
-
-                skills.push(serde_json::json!({
-                    "name": name,
-                    "description": description,
-                    "source": source,
-                }));
-            }
-        }
-        Ok(skills)
+        Ok(results)
     }
 
-    // -- SQLite CRUD --
+    // -- SQLite CRUD (unchanged) --
 
     pub fn insert_memory(
         &self,
@@ -704,7 +710,6 @@ impl MemoryStore {
     }
 
     pub fn close(&mut self) -> Result<()> {
-        // Connection is dropped when store is dropped
         Ok(())
     }
 }
