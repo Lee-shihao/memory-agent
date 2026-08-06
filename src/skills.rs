@@ -163,8 +163,9 @@ fn scan_skills_recursive(
                 description: desc,
                 source: source.to_string(),
             });
-        } else if depth < 2 {
+        } else if depth < 6 {
             // Descend into container dirs; keep a stable namespace across them.
+            // Limit guards against pathological deep nesting in large plugin repos.
             let child_ns = if ns.is_empty() {
                 name
             } else {
