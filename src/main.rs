@@ -258,7 +258,7 @@ async fn run_pipeline(
 
     // Handle /memory slash commands
     if user_query.starts_with("/memory") {
-        if let Some(response) = commands::handle_slash_command(user_query, store, &[]) {
+        if let Some(response) = commands::handle_slash_command(user_query, store, &[]).await {
             println!("{response}");
             return Ok(());
         }
