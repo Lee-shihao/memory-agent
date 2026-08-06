@@ -253,7 +253,7 @@ async fn run_pipeline(
 
     // Pre-index skills (only if memory is enabled)
     if !skip_memory {
-        tools::pre_index_skills(config);
+        tools::pre_index_skills(config).await;
     }
 
     // Handle /memory slash commands

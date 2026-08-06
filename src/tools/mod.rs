@@ -116,9 +116,21 @@ pub fn execute_tool(name: &str, args: &HashMap<String, JsonValue>) -> String {
         "git_status" => git::status(args),
         "ask_user" => interaction::ask_user(args),
         "load_skill" => interaction::load_skill(args),
-        "search_memory" => interaction::search_memory(args),
-        "search_skills" => interaction::search_skills(args),
+        // Async tools: handled via execute_tool_async to avoid nested runtime
+        "search_memory" | "search_skills" => {
+            "Error: internal — use execute_tool_async for async tools".to_string()
+        }
         _ => format!("Error: Unknown tool '{name}'"),
+    }
+}
+
+/// Execute async-capable tools. Must be called from within a tokio runtime context.
+pub async fn execute_tool_async(name: &str, args: &HashMap<String, JsonValue>) -> String {
+    match name {
+        "search_memory" => interaction::search_memory_async(args).await,
+        "search_skills" => interaction::search_skills_async(args).await,
+        // Fall back to sync dispatch for all other tools
+        _ => execute_tool(name, args),
     }
 }
 
@@ -160,6 +172,115 @@ mod tests {
         assert_eq!(classify_bash_command("git status"), BashTier::Safe);
         assert_eq!(classify_bash_command("git diff"), BashTier::Safe);
         assert_eq!(classify_bash_command("git log"), BashTier::Safe);
+    }
+
+    #[test]
+    fn test_sync_tools_work_via_execute_tool() {
+        let mut args = HashMap::new();
+        args.insert("path".to_string(), serde_json::json!("."));
+        let result = execute_tool("list_files", &args);
+        // Should return directory listing, not an error
+        assert!(!result.starts_with("Error:"), "sync tool should succeed: {result}");
+    }
+
+    #[test]
+    fn test_sync_tools_work_via_execute_tool_async() {
+        let mut args = HashMap::new();
+        args.insert("path".to_string(), serde_json::json!("."));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(execute_tool_async("list_files", &args));
+        assert!(!result.starts_with("Error:"), "sync tool via async dispatch: {result}");
+    }
+
+    #[test]
+    fn test_async_tools_error_via_sync_execute_tool() {
+        let args = HashMap::new();
+        let result = execute_tool("search_memory", &args);
+        assert!(
+            result.contains("execute_tool_async"),
+            "sync dispatch should reject async tools: {result}"
+        );
+        let result = execute_tool("search_skills", &args);
+        assert!(
+            result.contains("execute_tool_async"),
+            "sync dispatch should reject async tools: {result}"
+        );
+    }
+
+    #[test]
+    fn test_unknown_tool_errors() {
+        let result = execute_tool("nonexistent_tool", &HashMap::new());
+        assert!(result.contains("Unknown tool"), "result: {result}");
+    }
+
+    #[test]
+    fn test_search_memory_no_nested_runtime_panic() {
+        // Verify that calling search_memory_async from within a runtime
+        // does NOT panic with "Cannot start a runtime from within a runtime"
+        let tmp = std::env::temp_dir().join(format!("test_tool_sm_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&tmp);
+        crate::tools::set_workspace_root(&tmp);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut args = HashMap::new();
+        args.insert("query".to_string(), serde_json::json!("test query"));
+        args.insert("top_k".to_string(), serde_json::json!(1));
+
+        // Should not panic. May fail on embedding API call (expected — no API key).
+        let result = rt.block_on(execute_tool_async("search_memory", &args));
+        // Verify we got past the runtime creation — either "No memories found"
+        // or an API error, but NOT a panic
+        assert!(
+            !result.contains("Cannot start a runtime"),
+            "nested runtime panic: {result}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_search_skills_no_nested_runtime_panic() {
+        let tmp = std::env::temp_dir().join(format!("test_tool_ss_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&tmp);
+        crate::tools::set_workspace_root(&tmp);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut args = HashMap::new();
+        args.insert("query".to_string(), serde_json::json!("test skill"));
+        args.insert("top_k".to_string(), serde_json::json!(1));
+
+        let result = rt.block_on(execute_tool_async("search_skills", &args));
+        assert!(
+            !result.contains("Cannot start a runtime"),
+            "nested runtime panic: {result}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_pre_index_skills_no_nested_runtime_panic() {
+        let tmp = std::env::temp_dir().join(format!("test_tool_pi_{}", uuid::Uuid::new_v4()));
+        let _ = std::fs::create_dir_all(&tmp);
+        crate::tools::set_workspace_root(&tmp);
+
+        let config = crate::config::Config {
+            llm_api_base: String::new(),
+            llm_api_key: String::new(),
+            llm_model: String::new(),
+            embedding_api_base: "https://localhost".to_string(),
+            embedding_api_key: "test".to_string(),
+            embedding_model: "test-model".to_string(),
+            retrieval_top_k: 10,
+            retrieval_similarity_threshold: 0.5,
+            extractor_auto_confirm: true,
+            extractor_keep_full_transcript: true,
+            memory_dir: tmp.clone(),
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // pre_index_skills should not panic — may return silently if no skills
+        rt.block_on(pre_index_skills(&config));
+        // If we got here without panicking, test passes
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

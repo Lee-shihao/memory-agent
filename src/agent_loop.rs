@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::debug;
 use crate::prompts::{build_system_prompt, ROUND_2_PLUS_PROMPT};
-use crate::tools::{execute_tool, workspace_root, TOOL_DEFINITIONS};
+use crate::tools::{execute_tool_async, workspace_root, TOOL_DEFINITIONS};
 use anyhow::Result;
 use serde_json::Value as JsonValue;
 /// Agent loop: OpenAI-compatible API with tool calling iteration.
@@ -164,7 +164,7 @@ pub async fn run_agent_loop(
                     };
 
                     let tool_result = if allowed {
-                        let mut result = execute_tool(tool_name, &args);
+                        let mut result = execute_tool_async(tool_name, &args).await;
                         if !feedback.is_empty() {
                             result.push_str(&format!("\n\n[User note: {feedback}]"));
                         }
