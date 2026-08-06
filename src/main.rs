@@ -235,6 +235,28 @@ fn tool_confirm(tool_name: &str, args: &HashMap<String, serde_json::Value>) -> (
     (true, String::new())
 }
 
+/// Parse a "/skill_name rest" command.
+///
+/// If `input` starts with `/` and the first token matches an installed skill,
+/// returns `(rest_query, Some(skill_content))`. Otherwise returns
+/// `(input.to_string(), None)` — the input is passed through unchanged.
+fn parse_skill_command(input: &str) -> (String, Option<String>) {
+    if !input.starts_with('/') {
+        return (input.to_string(), None);
+    }
+    let mut parts = input[1..].splitn(2, ' ');
+    let skill_name = parts.next().unwrap_or("").trim();
+    if skill_name.is_empty() {
+        return (input.to_string(), None);
+    }
+    if let Some(skill) = skills::get_skill(skill_name) {
+        let rest = parts.next().unwrap_or("").trim().to_string();
+        (rest, Some(skill.load()))
+    } else {
+        (input.to_string(), None)
+    }
+}
+
 /// Execute the full 3-step pipeline for a single conversation turn.
 async fn run_pipeline(
     user_query: &str,
@@ -264,11 +286,22 @@ async fn run_pipeline(
         }
     }
 
+    // Handle "/skill_name query" commands: load the skill and inject its
+    // content into the system prompt, using the rest as the user query.
+    let (effective_query, skill_context) = parse_skill_command(user_query);
+
     // Step 2: Agent Loop
     eprintln!();
     let confirm_cb: agent_loop::ConfirmCallback = Arc::new(tool_confirm);
-    let transcript =
-        agent_loop::run_agent_loop(config, user_query, None, 50, Some(confirm_cb)).await?;
+    let transcript = agent_loop::run_agent_loop(
+        config,
+        &effective_query,
+        None,
+        50,
+        Some(confirm_cb),
+        skill_context.as_deref(),
+    )
+    .await?;
     println!("{transcript}");
 
     // Step 3: Memory Extraction
@@ -364,9 +397,17 @@ impl Completer for ReplCompleter {
             return Ok((pos, vec![]));
         }
 
-        let top_level: &[&str] = &[
-            "/memory", "/exit", "/quit", "/q", "/help",
+        // Built-in commands plus installed skills (as "/name").
+        let mut top_level: Vec<String> = vec![
+            "/memory".to_string(),
+            "/exit".to_string(),
+            "/quit".to_string(),
+            "/q".to_string(),
+            "/help".to_string(),
         ];
+        for skill in crate::skills::cached_skills() {
+            top_level.push(format!("/{}", skill.name));
+        }
         let memory_subs: &[&str] = &[
             "recent", "search", "show", "delete", "status",
         ];

@@ -97,52 +97,82 @@ fn scan_skills(project_root: Option<&Path>) -> Vec<Skill> {
         if !search_dir.exists() {
             continue;
         }
-        let entries = match fs::read_dir(&search_dir) {
-            Ok(e) => e,
-            Err(_) => continue,
+        let source = if search_dir.starts_with(project_root.unwrap_or(&cwd)) {
+            "project"
+        } else {
+            "user"
         };
+        scan_skills_recursive(&search_dir, source, "", 0, &mut skills, &mut seen);
+    }
+    skills
+}
 
-        let mut dirs: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
-        dirs.sort();
+/// Recursively discover SKILL.md files under `dir`.
+///
+/// - `ns` is the namespace prefix for the current directory (empty at the top).
+/// - A skill found directly under the search path gets a bare name
+///   (`brainstorming`). Nested skills get a namespace from the top-level
+///   directory (`superpowers:brainstorming`).
+/// - Intermediate container dirs (e.g. `superpowers/skills/`) keep the same
+///   namespace instead of polluting the name with `skills`.
+fn scan_skills_recursive(
+    dir: &Path,
+    source: &str,
+    ns: &str,
+    depth: usize,
+    out: &mut Vec<Skill>,
+    seen: &mut HashSet<String>,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
 
-        for entry in &dirs {
-            let name = entry
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
-            if name.starts_with('.') || seen.contains(&name) {
-                continue;
-            }
+    for entry in &dirs {
+        let name = entry
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        if name.starts_with('.') {
+            continue;
+        }
 
-            let skill_md = entry.join("SKILL.md");
-            if !skill_md.exists() {
-                continue;
-            }
-
-            seen.insert(name.clone());
-
-            let source = if search_dir.starts_with(project_root.unwrap_or(&cwd)) {
-                "project"
+        if entry.join("SKILL.md").exists() {
+            let full_name = if ns.is_empty() {
+                name.clone()
             } else {
-                "user"
+                format!("{ns}:{name}")
             };
-
-            let desc = extract_description(&fs::read_to_string(&skill_md).unwrap_or_default());
-
-            skills.push(Skill {
-                name,
+            if seen.contains(&full_name) {
+                continue;
+            }
+            seen.insert(full_name.clone());
+            let desc = extract_description(
+                &fs::read_to_string(entry.join("SKILL.md")).unwrap_or_default(),
+            );
+            out.push(Skill {
+                name: full_name,
                 path: entry.clone(),
                 description: desc,
                 source: source.to_string(),
             });
+        } else if depth < 2 {
+            // Descend into container dirs; keep a stable namespace across them.
+            let child_ns = if ns.is_empty() {
+                name
+            } else {
+                ns.to_string()
+            };
+            scan_skills_recursive(entry, source, &child_ns, depth + 1, out, seen);
         }
     }
-    skills
 }
 
 // -- Public API (cache-based) -------------------------------------------------
@@ -232,7 +262,7 @@ pub fn list_installed_skills(project_root: Option<&Path>) -> String {
         }
         let names: Vec<&str> = skills
             .iter()
-            .filter(|s| s.path.parent().map_or(false, |p| p == search_dir))
+            .filter(|s| s.path.starts_with(&search_dir))
             .map(|s| s.name.as_str())
             .collect();
         if !names.is_empty() {
@@ -366,7 +396,7 @@ pub fn install_skill(source: &str, project_root: Option<&Path>) -> String {
     fs::create_dir_all(&target_dir).ok();
 
     let source_path = Path::new(source);
-    let (installed_name, result_msg) = if source_path.is_dir() {
+    let result_msg = if source_path.is_dir() {
         let name = source_path
             .file_name()
             .unwrap_or_default()
@@ -379,7 +409,7 @@ pub fn install_skill(source: &str, project_root: Option<&Path>) -> String {
             Ok(_) => format!("Skill '{name}' installed from {}", source_path.display()),
             Err(e) => return format!("Error copying directory: {e}"),
         };
-        (name.to_string(), msg)
+        msg
     } else {
         let name = source
             .trim_end_matches('/')
@@ -410,30 +440,13 @@ pub fn install_skill(source: &str, project_root: Option<&Path>) -> String {
                 return format!("Error: git not available for remote skill installation: {e}");
             }
         };
-        (name, msg)
+        msg
     };
 
-    // Update in-memory cache
+    // Rescan to pick up the installed skill and any nested skills (e.g.
+    // a repo like superpowers that contains skills/ subdirectories).
     if is_cache_initialized() {
-        let skill_dir = target_dir.join(&installed_name);
-        let skill_md = skill_dir.join("SKILL.md");
-        if skill_md.exists() {
-            let desc = extract_description(&fs::read_to_string(&skill_md).unwrap_or_default());
-            let source_label = if skill_dir.starts_with(proj) {
-                "project"
-            } else {
-                "user"
-            };
-            let new_skill = Skill {
-                name: installed_name,
-                path: skill_dir,
-                description: desc,
-                source: source_label.to_string(),
-            };
-            let mut cache = SKILLS_CACHE.write().unwrap();
-            cache.retain(|s| s.name != new_skill.name);
-            cache.push(new_skill);
-        }
+        *SKILLS_CACHE.write().unwrap() = scan_skills(Some(proj));
     }
 
     result_msg
@@ -452,4 +465,85 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_skill_dir(base: &Path, rel: &str) {
+        let dir = base.join(rel);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("SKILL.md"), format!("# {}\n", dir.file_name().unwrap().to_string_lossy())).unwrap();
+    }
+
+    #[test]
+    fn test_scan_finds_top_level_and_nested_skills() {
+        let root = std::env::temp_dir().join(format!("skills_scan_{}", uuid::Uuid::new_v4()));
+        // Top-level skill
+        make_skill_dir(&root, "brainstorming");
+        // Nested: repo/container structure (superpowers repo style)
+        make_skill_dir(&root, "superpowers/skills/systematic-debugging");
+        make_skill_dir(&root, "superpowers/skills/writing-plans");
+
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        scan_skills_recursive(&root, "project", "", 0, &mut out, &mut seen);
+
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"brainstorming"), "top-level skill: {names:?}");
+        assert!(
+            names.contains(&"superpowers:systematic-debugging"),
+            "nested skill with ns: {names:?}"
+        );
+        assert!(
+            names.contains(&"superpowers:writing-plans"),
+            "nested skill with ns: {names:?}"
+        );
+        assert_eq!(out.len(), 3, "all skills found: {names:?}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_scan_skips_dot_dirs_and_dedups() {
+        let root = std::env::temp_dir().join(format!("skills_dedup_{}", uuid::Uuid::new_v4()));
+        make_skill_dir(&root, ".hidden-skill");
+        make_skill_dir(&root, "alpha");
+        make_skill_dir(&root, "repo/alpha"); // same name under different ns
+
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        scan_skills_recursive(&root, "project", "", 0, &mut out, &mut seen);
+
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        assert!(!names.contains(&".hidden-skill"), "dot dir skipped: {names:?}");
+        assert!(names.contains(&"alpha"), "top-level alpha: {names:?}");
+        assert!(names.contains(&"repo:alpha"), "namespaced alpha: {names:?}");
+        assert_eq!(out.len(), 2, "both alphas kept: {names:?}");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_list_installed_groups_nested_skills() {
+        let root = std::env::temp_dir().join(format!("skills_list_{}", uuid::Uuid::new_v4()));
+        make_skill_dir(&root, "brainstorming");
+        make_skill_dir(&root, "repo/skills/systematic-debugging");
+
+        let mut out = Vec::new();
+        let mut seen = HashSet::new();
+        scan_skills_recursive(&root, "project", "", 0, &mut out, &mut seen);
+
+        // list_installed_skills uses search_paths + parent filter; simulate by grouping
+        let group: Vec<&str> = out
+            .iter()
+            .filter(|s| s.path.starts_with(&root))
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(group.contains(&"brainstorming"));
+        assert!(group.contains(&"repo:systematic-debugging"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

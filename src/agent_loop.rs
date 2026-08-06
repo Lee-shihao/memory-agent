@@ -17,11 +17,17 @@ pub async fn run_agent_loop(
     tools: Option<&[JsonValue]>,
     max_iterations: usize,
     confirm_callback: Option<ConfirmCallback>,
+    skill_context: Option<&str>,
 ) -> Result<String> {
     let tools = tools.unwrap_or(&TOOL_DEFINITIONS);
     let client = reqwest::Client::new();
 
-    let base_prompt = build_system_prompt(&workspace_root());
+    let mut base_prompt = build_system_prompt(&workspace_root());
+    if let Some(skill) = skill_context {
+        base_prompt.push_str(&format!(
+            "\n\n--- Skill Instructions (user requested this skill, follow it) ---\n{skill}\n--- End Skill ---"
+        ));
+    }
 
     let mut messages: Vec<JsonValue> = vec![
         serde_json::json!({"role": "system", "content": &base_prompt}),
