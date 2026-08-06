@@ -223,16 +223,15 @@ fn split_body(body_lines: &[&str]) -> (Vec<String>, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     fn apply(file_content: &str, patch: &str) -> String {
-        let dir = std::env::temp_dir().join("apply_patch_test");
-        let _ = std::fs::create_dir_all(&dir);
+        // Use unique directory per test to avoid races when tests run in parallel
+        let dir = std::env::temp_dir().join(format!("apply_patch_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test_file.txt");
 
         // Write test file
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(file_content.as_bytes()).unwrap();
+        std::fs::write(&path, file_content).unwrap();
 
         // Override workspace root to temp dir
         crate::tools::set_workspace_root(&dir);
@@ -311,8 +310,8 @@ fn main() {
 
     #[test]
     fn test_dry_run_multi_hunk() {
-        let dir = std::env::temp_dir().join("apply_patch_test_dry");
-        let _ = std::fs::create_dir_all(&dir);
+        let dir = std::env::temp_dir().join(format!("apply_patch_dry_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("test.txt");
         std::fs::write(&path, "line 1\nline 2\nline 3\nline 4\n").unwrap();
 

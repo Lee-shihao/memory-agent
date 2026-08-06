@@ -2,6 +2,19 @@ use crate::prompts::Memory;
 /// Slash command handlers for /memory operations.
 use crate::storage::MemoryStore;
 
+/// Truncate a string to at most `max_chars` characters on a valid UTF-8 boundary.
+fn truncate_str(s: &str, max_chars: usize) -> &str {
+    if s.chars().count() <= max_chars {
+        return s;
+    }
+    let end = s
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    &s[..end]
+}
+
 pub fn handle_slash_command(
     message: &str,
     store: &MemoryStore,
@@ -64,11 +77,7 @@ fn cmd_recent(store: &MemoryStore, n: usize) -> String {
         Ok(memories) if !memories.is_empty() => {
             let mut lines = vec![format!("Recent {} memories:", memories.len())];
             for mem in &memories {
-                let summary = if mem.summary.len() > 80 {
-                    &mem.summary[..80]
-                } else {
-                    &mem.summary
-                };
+                let summary = truncate_str(&mem.summary, 80);
                 lines.push(format!("  [{}] {}", mem.id, summary));
             }
             lines.join("\n")
@@ -86,7 +95,7 @@ fn cmd_search(store: &MemoryStore, query: &str) -> String {
                 for r in results {
                     let mid = r.get("memory_id").and_then(|v| v.as_str()).unwrap_or("?");
                     let text = r.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    let text = if text.len() > 100 { &text[..100] } else { text };
+                    let text = truncate_str(text, 100);
                     lines.push(format!("  [{mid}] {text}"));
                 }
                 lines.join("\n")
