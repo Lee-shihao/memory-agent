@@ -99,6 +99,18 @@ pub static TOOL_DEFINITIONS: Lazy<Vec<JsonValue>> = Lazy::new(|| {
     ]
 });
 
+/// Truncate `s` to at most `max_bytes` without splitting a multi-byte character.
+pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Dispatch
 // ═══════════════════════════════════════════════════════════════════════════════

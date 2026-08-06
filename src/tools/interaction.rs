@@ -132,7 +132,7 @@ pub async fn search_memory_async(args: &HashMap<String, JsonValue>) -> String {
     for r in &new {
         let mid = r.get("memory_id").and_then(|v| v.as_str()).unwrap_or("?");
         let text = r.get("text").and_then(|v| v.as_str()).unwrap_or("");
-        let text = if text.len() > 200 { &text[..200] } else { text };
+        let text = super::safe_truncate(text, 200);
         lines.push(format!("[{mid}] {text}"));
     }
     lines.join("\n")

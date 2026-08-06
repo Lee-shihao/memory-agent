@@ -3,6 +3,7 @@ use crate::prompts::{
     format_memories_for_injection, Memory, RETRIEVAL_DECISION_SYSTEM_PROMPT,
     RETRIEVAL_DECISION_USER_TEMPLATE,
 };
+use crate::tools;
 use crate::storage::MemoryStore;
 use anyhow::Result;
 use serde::Deserialize;
@@ -151,11 +152,7 @@ impl<'a> Retriever<'a> {
             } else {
                 memories.push(Memory {
                     id: mid,
-                    summary: if text.len() > 200 {
-                        text[..200].to_string()
-                    } else {
-                        text
-                    },
+                    summary: tools::safe_truncate(&text, 200).to_string(),
                     ..Default::default()
                 });
             }

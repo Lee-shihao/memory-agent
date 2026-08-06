@@ -66,7 +66,7 @@ pub fn run(args: &HashMap<String, JsonValue>) -> String {
             if re.is_match(line) {
                 let rel = fp.strip_prefix(&ws).unwrap_or(fp);
                 let ctx = line.trim();
-                let ctx = if ctx.len() > 200 { &ctx[..200] } else { ctx };
+                let ctx = super::safe_truncate(ctx, 200);
                 results.push(serde_json::json!({
                     "file": rel.to_string_lossy(),
                     "line": lineno + 1,

@@ -178,7 +178,7 @@ pub async fn run_agent_loop(
                     };
 
                     let result_preview = if tool_result.len() > 500 {
-                        format!("{}...", &tool_result[..500])
+                        format!("{}...", crate::tools::safe_truncate(&tool_result, 500))
                     } else {
                         tool_result.clone()
                     };

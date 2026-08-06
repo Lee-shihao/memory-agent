@@ -120,7 +120,7 @@ const MEMORY_CONTEXT_HEADER: &str = "## Relevant Memories (from past conversatio
 
 pub fn format_memory_for_injection(memory: &Memory) -> String {
     let date = memory.conversation_at.as_deref().unwrap_or("unknown");
-    let date = if date.len() >= 10 { &date[..10] } else { date };
+    let date = crate::tools::safe_truncate(date, 10);
     let key_points = if memory.key_points.is_empty() {
         "  (none)".to_string()
     } else {
