@@ -91,10 +91,9 @@ pub async fn search_memory_async(args: &HashMap<String, JsonValue>) -> String {
     if let Err(e) = store.init_schema() {
         return format!("Schema error: {e}");
     }
-    if !store.is_lancedb_initialized() {
+    if !store.is_vector_store_initialized() {
         if let Err(e) = store
-            .init_lancedb(
-                &config.memory_dir,
+            .init_vector_store(
                 &config.embedding_api_base,
                 &config.embedding_api_key,
                 &config.embedding_model,
@@ -104,7 +103,7 @@ pub async fn search_memory_async(args: &HashMap<String, JsonValue>) -> String {
             return format!("Init error: {e}");
         }
     }
-    let results = match store.query_lancedb(query, top_k).await {
+    let results = match store.search_memory_vectors(query, top_k).await {
         Ok(r) => r,
         Err(e) => return format!("Search failed: {e}"),
     };

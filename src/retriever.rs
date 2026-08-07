@@ -129,7 +129,7 @@ impl<'a> Retriever<'a> {
     async fn semantic_search(&self, query: &str) -> Result<Vec<Memory>> {
         let results = self
             .store
-            .query_lancedb(query, self.config.retrieval_top_k)
+            .search_memory_vectors(query, self.config.retrieval_top_k)
             .await?;
 
         let mut memories = Vec::new();
@@ -145,7 +145,7 @@ impl<'a> Retriever<'a> {
                 .unwrap_or("")
                 .to_string();
 
-            // Build a Memory from LanceDB result
+            // Build a Memory from the vector search result
             // Try to hydrate from SQLite first
             if let Ok(Some(full)) = self.store.get_memory(&mid) {
                 memories.push(full);

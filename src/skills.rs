@@ -1,4 +1,4 @@
-/// Skill discovery, loading, installation, and LanceDB-based embedding routing.
+/// Skill discovery, loading, installation, and sqlite-vec-based embedding routing.
 ///
 /// Skills are cached in memory after initial scan. Subsequent lookups return
 /// from cache without disk I/O. File content is loaded lazily only when needed.
@@ -276,20 +276,20 @@ pub fn list_installed_skills(project_root: Option<&Path>) -> String {
     lines.join("\n")
 }
 
-// -- SkillRouter (LanceDB-based embedding search) ----------------------------
+// -- SkillRouter (sqlite-vec based embedding search) -------------------------
 
 pub struct SkillRouter {
     pub embedding_api_base: String,
     pub embedding_api_key: String,
     pub embedding_model: String,
-    pub chroma_dir: PathBuf,
+    pub memory_dir: PathBuf,
     pub indexed: HashSet<String>,
     initialized: bool,
 }
 
 impl SkillRouter {
     pub fn new(
-        chroma_dir: &Path,
+        memory_dir: &Path,
         embedding_api_base: &str,
         embedding_api_key: &str,
         embedding_model: &str,
@@ -298,7 +298,7 @@ impl SkillRouter {
             embedding_api_base: embedding_api_base.to_string(),
             embedding_api_key: embedding_api_key.to_string(),
             embedding_model: embedding_model.to_string(),
-            chroma_dir: chroma_dir.to_path_buf(),
+            memory_dir: memory_dir.to_path_buf(),
             indexed: HashSet::new(),
             initialized: false,
         }
@@ -334,21 +334,16 @@ impl SkillRouter {
             .filter(|s| !self.indexed.contains(&s.name))
             .collect();
 
-        if new_skills.is_empty() {
+        if new_skills.is_empty() && to_remove.is_empty() {
             return Ok(());
         }
 
-        let db_path = self
-            .chroma_dir
-            .parent()
-            .unwrap_or(&self.chroma_dir)
-            .join("memories.db");
+        let db_path = self.memory_dir.join("memories.db");
         let mut store = crate::storage::MemoryStore::new(&db_path)?;
         store.init_schema()?;
-        if !store.is_lancedb_initialized() {
+        if !store.is_vector_store_initialized() {
             store
-                .init_lancedb(
-                    &self.chroma_dir,
+                .init_vector_store(
                     &self.embedding_api_base,
                     &self.embedding_api_key,
                     &self.embedding_model,
@@ -356,9 +351,13 @@ impl SkillRouter {
                 .await?;
         }
 
+        for name in &to_remove {
+            store.remove_skill_vector(name)?;
+        }
+
         for s in &new_skills {
             store
-                .add_skill_to_lancedb(&s.name, &s.index_text(), &s.description, &s.source)
+                .add_skill_vector(&s.name, &s.index_text(), &s.description, &s.source)
                 .await?;
             self.indexed.insert(s.name.clone());
         }
@@ -367,24 +366,19 @@ impl SkillRouter {
     }
 
     pub async fn search(&self, query: &str, top_k: usize) -> Result<Vec<JsonValue>> {
-        let db_path = self
-            .chroma_dir
-            .parent()
-            .unwrap_or(&self.chroma_dir)
-            .join("memories.db");
+        let db_path = self.memory_dir.join("memories.db");
         let mut store = crate::storage::MemoryStore::new(&db_path)?;
         store.init_schema()?;
-        if !store.is_lancedb_initialized() {
+        if !store.is_vector_store_initialized() {
             store
-                .init_lancedb(
-                    &self.chroma_dir,
+                .init_vector_store(
                     &self.embedding_api_base,
                     &self.embedding_api_key,
                     &self.embedding_model,
                 )
                 .await?;
         }
-        store.search_skills_lancedb(query, top_k).await
+        store.search_skill_vectors(query, top_k).await
     }
 }
 

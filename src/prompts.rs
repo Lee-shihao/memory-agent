@@ -12,7 +12,7 @@ pub struct Memory {
     pub tags: Vec<String>,
     pub entities: Vec<Entity>,
     pub decisions: Vec<String>,
-    pub chroma_doc_id: Option<String>,
+    pub vec_rowid: Option<i64>,
     pub conversation_json: Option<String>,
 }
 

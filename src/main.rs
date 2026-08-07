@@ -595,8 +595,7 @@ fn main() -> Result<()> {
     let db_path = config.memory_dir.join("memories.db");
     let mut store = storage::MemoryStore::new(&db_path)?;
     store.init_schema()?;
-    rt.block_on(store.init_lancedb(
-        &config.memory_dir,
+    rt.block_on(store.init_vector_store(
         &config.embedding_api_base,
         &config.embedding_api_key,
         &config.embedding_model,

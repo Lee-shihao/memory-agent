@@ -87,7 +87,7 @@ fn cmd_recent(store: &MemoryStore, n: usize) -> String {
 }
 
 async fn cmd_search(store: &MemoryStore, query: &str) -> String {
-    match store.query_lancedb(query, 5).await {
+    match store.search_memory_vectors(query, 5).await {
         Ok(results) if !results.is_empty() => {
             let mut lines = vec![format!("Search results for '{}':", query)];
             for r in results {
@@ -160,10 +160,7 @@ fn cmd_show(store: &MemoryStore, memory_id: &str) -> String {
 
 async fn cmd_delete(store: &MemoryStore, memory_id: &str) -> String {
     match store.get_memory(memory_id) {
-        Ok(Some(mem)) => {
-            if let Some(ref doc_id) = mem.chroma_doc_id {
-                store.delete_from_lancedb(doc_id).await.ok();
-            }
+        Ok(Some(_)) => {
             store.delete_memory(memory_id).ok();
             format!("Memory deleted: {memory_id}")
         }
@@ -310,7 +307,7 @@ mod tests {
             tags: vec![],
             entities: vec![],
             decisions: vec![],
-            chroma_doc_id: None,
+            vec_rowid: None,
             conversation_json: None,
         };
         let result = cmd_show_injected(&[mem]);
@@ -328,11 +325,9 @@ mod tests {
         // Create a runtime and call the async command within it
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
-            // init vector store so query_lancedb doesn't bail early
-            let tmp = std::env::temp_dir().join("test_cmd_search_hnsw");
-            let _ = std::fs::create_dir_all(&tmp);
+            // init vector store so search_memory_vectors doesn't bail early
             store
-                .init_vector_store(&tmp, "https://localhost", "key", "model")
+                .init_vector_store("https://localhost", "key", "model")
                 .await
                 .ok();
             cmd_search(&store, "test").await
@@ -344,7 +339,6 @@ mod tests {
             "result: {result}"
         );
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("test_cmd_search_hnsw"));
     }
 
     #[test]
@@ -356,17 +350,14 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(async {
-            let tmp = std::env::temp_dir().join("test_cmd_delete_hnsw");
-            let _ = std::fs::create_dir_all(&tmp);
             store
-                .init_vector_store(&tmp, "https://localhost", "key", "model")
+                .init_vector_store("https://localhost", "key", "model")
                 .await
                 .ok();
             cmd_delete(&store, "nonexistent").await
         });
         assert!(result.contains("Memory not found"), "result: {result}");
         let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("test_cmd_delete_hnsw"));
     }
 
     #[test]

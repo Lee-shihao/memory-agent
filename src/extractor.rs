@@ -197,18 +197,6 @@ async fn store_result(
 
     let memory_id: String = uuid::Uuid::new_v4().to_string().chars().take(12).collect();
 
-    // Add to LanceDB
-    let chroma_doc_id = store
-        .add_to_lancedb(
-            &memory_id,
-            &embedding_text,
-            &serde_json::json!({
-                "tags": result.tags.join(","),
-                "conversation_at": now.to_rfc3339(),
-            }),
-        )
-        .await?;
-
     // Build conversation JSON
     let conversation_json = if config.extractor_keep_full_transcript {
         Some(serde_json::json!({"transcript": transcript}).to_string())
@@ -216,18 +204,18 @@ async fn store_result(
         None
     };
 
-    // Insert into SQLite
+    // Insert metadata first, then the vector (which sets memories.vec_rowid).
     store.insert_memory(
         &result.summary,
         &now,
         conversation_json.as_deref(),
-        &chroma_doc_id,
         &result.key_points,
         &result.tags,
         &result.entities,
         &result.decisions,
         Some(&memory_id),
     )?;
+    store.add_memory_vector(&memory_id, &embedding_text).await?;
 
     eprintln!("  Memory ID: {memory_id}");
     Ok(())

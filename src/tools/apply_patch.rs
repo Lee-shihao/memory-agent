@@ -225,29 +225,23 @@ mod tests {
     use super::*;
 
     fn apply(file_content: &str, patch: &str) -> String {
-        // Use unique directory per test to avoid races when tests run in parallel
-        let dir = std::env::temp_dir().join(format!("apply_patch_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test_file.txt");
+        crate::tools::with_test_workspace(|dir| {
+            let path = dir.join("test_file.txt");
 
-        // Write test file
-        std::fs::write(&path, file_content).unwrap();
+            // Write test file
+            std::fs::write(&path, file_content).unwrap();
 
-        // Override workspace root to temp dir
-        crate::tools::set_workspace_root(&dir);
+            let mut args = HashMap::new();
+            args.insert("path".to_string(), serde_json::json!("test_file.txt"));
+            args.insert("patch".to_string(), serde_json::json!(patch));
+            args.insert("dry_run".to_string(), serde_json::json!(false));
 
-        let mut args = HashMap::new();
-        args.insert("path".to_string(), serde_json::json!("test_file.txt"));
-        args.insert("patch".to_string(), serde_json::json!(patch));
-        args.insert("dry_run".to_string(), serde_json::json!(false));
+            let result = run(&args);
 
-        let result = run(&args);
-
-        // Read back modified file
-        let modified = std::fs::read_to_string(&path).unwrap_or_default();
-
-        let _ = std::fs::remove_dir_all(&dir);
-        format!("result: {result}\nfile:\n{modified}")
+            // Read back modified file
+            let modified = std::fs::read_to_string(&path).unwrap_or_default();
+            format!("result: {result}\nfile:\n{modified}")
+        })
     }
 
     #[test]
@@ -310,28 +304,25 @@ fn main() {
 
     #[test]
     fn test_dry_run_multi_hunk() {
-        let dir = std::env::temp_dir().join(format!("apply_patch_dry_{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test.txt");
-        std::fs::write(&path, "line 1\nline 2\nline 3\nline 4\n").unwrap();
+        crate::tools::with_test_workspace(|dir| {
+            let path = dir.join("test.txt");
+            std::fs::write(&path, "line 1\nline 2\nline 3\nline 4\n").unwrap();
 
-        crate::tools::set_workspace_root(&dir);
+            let mut args = HashMap::new();
+            args.insert("path".to_string(), serde_json::json!("test.txt"));
+            args.insert(
+                "patch".to_string(),
+                serde_json::json!("@@ -1,2 +1,2 @@\n line 1\n line 2\n@@ -4,1 +4,1 @@\n line 4\n"),
+            );
+            args.insert("dry_run".to_string(), serde_json::json!(true));
 
-        let mut args = HashMap::new();
-        args.insert("path".to_string(), serde_json::json!("test.txt"));
-        args.insert(
-            "patch".to_string(),
-            serde_json::json!("@@ -1,2 +1,2 @@\n line 1\n line 2\n@@ -4,1 +4,1 @@\n line 4\n"),
-        );
-        args.insert("dry_run".to_string(), serde_json::json!(true));
+            let result = run(&args);
 
-        let result = run(&args);
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert!(
-            result.contains("Dry run") && result.contains("would apply cleanly"),
-            "Dry run should validate all hunks: {result}"
-        );
+            assert!(
+                result.contains("Dry run") && result.contains("would apply cleanly"),
+                "Dry run should validate all hunks: {result}"
+            );
+        });
     }
 
     #[test]

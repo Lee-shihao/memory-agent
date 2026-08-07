@@ -128,8 +128,7 @@ extractor:
 ```
 .agent-memory/
 ├── config.yaml       # 配置文件
-├── memories.db       # SQLite：记忆元数据、标签、实体
-└── lancedb/          # LanceDB：向量嵌入
+└── memories.db       # SQLite：记忆元数据 + sqlite-vec 向量（单库存储）
 ```
 
 ## 运行测试
@@ -144,12 +143,13 @@ cargo test
 src/
 ├── main.rs          # 入口：CLI + 会话初始化 + Agent Loop + 记忆提取
 ├── config.rs        # 配置加载、环境变量替换
-├── storage.rs       # SQLite + LanceDB 存储层
+├── storage/         # 存储层：schema.rs / relation.rs / vector.rs
+│   └── mod.rs       # MemoryStore：SQLite 关系表 + sqlite-vec 向量（单库）
 ├── retriever.rs     # LLM 决策 + 双通道检索
 ├── agent_loop.rs    # OpenAI 兼容 API + 动态 system prompt + tool calling
 ├── extractor.rs     # 对话后记忆提取 + 用户审核
 ├── tools.rs         # 内置工具（含 search_memory / search_skills + 去重）
-├── skills.rs        # Skill 发现、LanceDB 路由
+├── skills.rs        # Skill 发现、sqlite-vec 路由
 ├── commands.rs      # /memory 系列命令
 ├── prompts.rs       # Prompt 模板
 └── debug.rs         # HTTP 调试日志 + token 统计
@@ -159,7 +159,7 @@ src/
 
 | 组件 | 选型 |
 |------|------|
-| 向量数据库 | LanceDB（embedded，Rust-native） |
+| 向量存储 | sqlite-vec（vec0 虚拟表，与元数据同库） |
 | 元数据存储 | SQLite（rusqlite） |
 | LLM | 兼容 OpenAI API 的任意后端（默认 deepseek-chat） |
 | Embedding | 兼容 OpenAI API（默认 SiliconFlow BAAI/bge-m3） |
@@ -170,7 +170,7 @@ src/
 
 ## 与 Python 版的区别
 
-- 向量数据库从 ChromaDB 替换为 **LanceDB**（Rust-native，无需 Python 运行时）
+- 向量存储从 ChromaDB/LanceDB/HNSW 演进为 **sqlite-vec**（vec0 虚拟表，向量与元数据同库，增量写入）
 - 异步运行时基于 **Tokio**，支持真正的并发请求
 - 编译为单个静态二进制文件，无外部运行时依赖
 - 性能更优，内存占用更低
